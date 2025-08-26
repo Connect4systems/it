@@ -21,6 +21,24 @@ app_license = "mit"
 # 	}
 # ]
 
+# apps/it/it/hooks.py
+
+# Ensure your JS runs (optional if you also use the client live math)
+doctype_js = {
+    "Opportunity": "public/js/opportunity.js",
+
+     "Opportunity": "public/js/opportunity_fix.js",
+}
+
+# Make the server math run on every save
+doc_events = {
+    "Opportunity": {
+        "validate": "it.handlers.opportunity_bundle.on_validate",
+    }
+}
+
+
+
 # Includes in <head>
 # ------------------
 

@@ -1,7 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.build/
+
+# Node / assets
+node_modules/
+*.map
+
+# OS / editors
 .DS_Store
-*.pyc
-*.egg-info
-*.swp
-tags
-node_modules
-__pycache__
+Thumbs.db
+.vscode/
+.idea/
+
+# Bench build artifacts (don’t version compiled assets)
+it/public/*.min.*
