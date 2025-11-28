@@ -25,16 +25,22 @@ app_license = "mit"
 
 # Ensure your JS runs (optional if you also use the client live math)
 doctype_js = {
-    "Opportunity": "public/js/opportunity.js",
-
-     "Opportunity": "public/js/opportunity_fix.js",
+    "Opportunity": "public/js/doctype/opportunity/opportunity_bom_build.js",
 }
 
-# Make the server math run on every save
-doc_events = {
-    "Opportunity": {
-        "validate": "it.handlers.opportunity_bundle.on_validate",
-    }
+
+# ... existing imports/metadata ...
+
+# Make the standard Create→Quotation also copy our bundle rows
+
+# Make "Create" wizards also carry our Delivery BOM and merge it to DN
+override_whitelisted_methods = {
+    "erpnext.crm.doctype.opportunity.opportunity.make_quotation":
+        "it.api.make_quotation_with_bundle",
+    "erpnext.selling.doctype.quotation.quotation.make_sales_order":
+        "it.api.make_sales_order_with_bundle",
+    "erpnext.selling.doctype.sales_order.sales_order.make_delivery_note":
+        "it.api.make_delivery_note_merged",
 }
 
 

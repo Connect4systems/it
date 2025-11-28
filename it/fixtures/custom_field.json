@@ -1,0 +1,66 @@
+[
+  {
+    "doctype": "Custom Field",
+    "name": "Opportunity-custom_product_bundle",
+    "dt": "Opportunity",
+    "fieldname": "custom_product_bundle",
+    "fieldtype": "Table",
+    "label": "Product Bundle",
+    "options": "Product Bundle Item",
+    "insert_after": "items"
+  },
+
+  {
+    "doctype": "Custom Field",
+    "name": "Opportunity Item-custom_bom",
+    "dt": "Opportunity Item",
+    "fieldname": "custom_bom",
+    "fieldtype": "Link",
+    "label": "BOM",
+    "options": "BOM",
+    "insert_after": "qty"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Opportunity Item-custom_cost",
+    "dt": "Opportunity Item",
+    "fieldname": "custom_cost",
+    "fieldtype": "Currency",
+    "label": "Cost",
+    "insert_after": "uom"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Opportunity Item-custom_margin",
+    "dt": "Opportunity Item",
+    "fieldname": "custom_margin",
+    "fieldtype": "Percent",
+    "label": "Margin %",
+    "insert_after": "rate",
+    "description": "Calculated as (Rate − Cost) / Rate × 100"
+  },
+
+  {
+    "doctype": "Custom Field",
+    "name": "Product Bundle Item-custom_parent_row",
+    "dt": "Product Bundle Item",
+    "fieldname": "custom_parent_row",
+    "fieldtype": "Int",
+    "label": "Parent Opportunity Item Row",
+    "insert_after": "uom",
+    "hidden": 1,
+    "read_only": 1
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Product Bundle Item-custom_base_qty",
+    "dt": "Product Bundle Item",
+    "fieldname": "custom_base_qty",
+    "fieldtype": "Float",
+    "label": "Base Qty (per 1 parent)",
+    "insert_after": "custom_parent_row",
+    "hidden": 1,
+    "read_only": 1,
+    "precision": "3"
+  }
+]
