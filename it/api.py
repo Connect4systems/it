@@ -362,3 +362,12 @@ def make_purchase_order_from_so_bundle(sales_order: str):
         pass
 
     return po
+
+
+# ----------------------------------------------------------------------
+# 7) Sales Order -> Purchase Order override (include custom_delivery_bom)
+# ----------------------------------------------------------------------
+@frappe.whitelist()
+def make_purchase_order_merged(source_name: str, target_doc: dict | None = None):
+    # ignore target_doc to avoid core checks and ensure BOM items are included
+    return make_purchase_order_from_so_bundle(source_name)
