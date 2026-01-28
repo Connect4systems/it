@@ -48,6 +48,8 @@ override_whitelisted_methods = {
         "it.api.make_sales_invoice_merged",
     "erpnext.selling.doctype.sales_order.sales_order.make_purchase_order":
         "it.api.make_purchase_order_merged",
+    "erpnext.selling.doctype.sales_order.sales_order.get_items":
+        "it.api.get_items_merged",
 }
 
 
