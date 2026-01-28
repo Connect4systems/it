@@ -373,6 +373,71 @@ def make_purchase_order_merged(source_name: str, target_doc: dict | None = None)
     return make_purchase_order_from_so_bundle(source_name)
 
 
+@frappe.whitelist()
+def make_purchase_order_from_so_selection(sales_order: str, selections):
+    """
+    Create a Purchase Order from a Sales Order using a custom selection list
+    that can include both SO items and custom_delivery_bom rows.
+
+    selections: list of dicts with keys:
+      - source: "SO" | "BOM"
+      - item_code
+      - item_name
+      - description
+      - qty
+      - uom (optional)
+      - conversion_factor (optional)
+      - sales_order_item (optional, for SO rows)
+    """
+    selections = frappe.parse_json(selections)
+    if not isinstance(selections, list):
+        return None
+
+    so = frappe.get_doc("Sales Order", sales_order)
+
+    po = frappe.new_doc("Purchase Order")
+    po.company = so.company
+    po.currency = so.currency
+
+    schedule_date = getattr(so, "delivery_date", None) or frappe.utils.today()
+    po_item_meta = frappe.get_meta("Purchase Order Item")
+
+    def add_po_item(row: dict):
+        item_code = row.get("item_code")
+        qty = _f(row.get("qty"))
+        if not item_code or qty <= 0:
+            return
+
+        d = po.append("items", {})
+        d.item_code = item_code
+        d.item_name = row.get("item_name") or _item_name(item_code)
+        d.description = row.get("description") or ""
+        d.qty = qty
+        d.uom = row.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        d.conversion_factor = _f(row.get("conversion_factor") or 1)
+        d.schedule_date = schedule_date
+        d.rate = 0
+
+        if _has(po_item_meta, "sales_order"):
+            d.sales_order = so.name
+        so_item = row.get("sales_order_item")
+        if so_item and _has(po_item_meta, "sales_order_item"):
+            d.sales_order_item = so_item
+
+    for row in selections:
+        if isinstance(row, dict):
+            add_po_item(row)
+
+    po.flags.ignore_permissions = True
+    try:
+        po.run_method("set_missing_values")
+        po.run_method("calculate_taxes_and_totals")
+    except Exception:
+        pass
+
+    return po
+
+
 # ----------------------------------------------------------------------
 # 8) Sales Order -> Purchase Order item picker (include custom_delivery_bom)
 # ----------------------------------------------------------------------
