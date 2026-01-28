@@ -26,6 +26,9 @@ app_license = "mit"
 # Ensure your JS runs (optional if you also use the client live math)
 doctype_js = {
     "Opportunity": "public/js/doctype/opportunity/opportunity_bom_build.js",
+    "Quotation": "public/js/doctype/quotation/quotation_delivery_bom.js",
+    "Sales Order": "public/js/doctype/sales_order/sales_order_bundle.js",
+    "Delivery Note": "public/js/doctype/delivery_note/delivery_note_delivery_bom.js",
 }
 
 
