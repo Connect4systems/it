@@ -362,3 +362,70 @@ def make_purchase_order_from_so_bundle(sales_order: str):
         pass
 
     return po
+
+
+# ----------------------------------------------------------------------
+# 7) Sales Order -> Purchase Order override (include custom_delivery_bom)
+# ----------------------------------------------------------------------
+@frappe.whitelist()
+def make_purchase_order_merged(source_name: str, target_doc: dict | None = None):
+    # ignore target_doc to avoid core checks and ensure BOM items are included
+    return make_purchase_order_from_so_bundle(source_name)
+
+
+# ----------------------------------------------------------------------
+# 8) Sales Order -> Purchase Order item picker (include custom_delivery_bom)
+# ----------------------------------------------------------------------
+@frappe.whitelist()
+def get_items_merged(source_name: str, target_doc: dict | None = None):
+    """
+    Extend ERPNext Sales Order -> Purchase Order item picker to include
+    Sales Order.custom_delivery_bom rows.
+    """
+    from erpnext.selling.doctype.sales_order.sales_order import (
+        get_items as core_get_items,
+    )
+
+    base = core_get_items(source_name, target_doc)
+
+    # normalize to list
+    if isinstance(base, dict) and "items" in base:
+        items_list = base.get("items") or []
+        container = base
+    else:
+        items_list = base if isinstance(base, list) else []
+        container = None
+
+    try:
+        so = frappe.get_doc("Sales Order", source_name)
+    except frappe.DoesNotExistError:
+        return base
+
+    schedule_date = getattr(so, "delivery_date", None) or frappe.utils.today()
+
+    for r in (so.get("custom_delivery_bom") or []):
+        item_code = r.get("item")
+        if not item_code:
+            continue
+
+        qty = _f(r.get("qty"))
+        row = {
+            "item_code": item_code,
+            "item_name": r.get("item_name") or _item_name(item_code),
+            "description": r.get("description") or "",
+            "qty": qty,
+            "pending_qty": qty,
+            "uom": frappe.db.get_value("Item", item_code, "stock_uom"),
+            "stock_uom": frappe.db.get_value("Item", item_code, "stock_uom"),
+            "conversion_factor": 1,
+            "schedule_date": schedule_date,
+            "supplier": None,
+            "sales_order_item": None,
+        }
+        items_list.append(row)
+
+    if container is not None:
+        container["items"] = items_list
+        return container
+
+    return items_list
