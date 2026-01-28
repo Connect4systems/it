@@ -66,7 +66,7 @@ function build_po_selection_dialog(frm) {
   const rows = [...soItems, ...bomItems].filter(r => r.item_code);
 
   const d = new frappe.ui.Dialog({
-    title: __("Select Items (SO + Delivery BOM)"),
+    title: __("Select Items"),
     fields: [
       { fieldtype: "Check", fieldname: "select_all", label: __("Select All"), default: 1 },
       { fieldtype: "HTML", fieldname: "items_html" }
@@ -151,7 +151,14 @@ function build_po_selection_dialog(frm) {
 frappe.ui.form.on("Sales Order", {
   refresh(frm) {
     if (frm.is_new()) return;
-    frm.add_custom_button(__("Purchase Order (SO + Delivery BOM)"), () => {
+
+    // Remove the standard Purchase Order button to avoid using the core picker
+    try {
+      frm.remove_custom_button(__("Purchase Order"), __("Create"));
+    } catch (e) {}
+
+    // Add our custom picker using the standard label
+    frm.add_custom_button(__("Purchase Order"), () => {
       build_po_selection_dialog(frm);
     }, __("Create"));
   }
