@@ -429,3 +429,62 @@ def get_items_merged(source_name: str, target_doc: dict | None = None):
         return container
 
     return items_list
+
+
+@frappe.whitelist()
+def get_items_from_sales_order_merged(sales_order: str, *args, **kwargs):
+    """
+    Override Purchase Order item picker to include Sales Order.custom_delivery_bom rows.
+    Compatible with different ERPNext versions by accepting *args/**kwargs.
+    """
+    try:
+        from erpnext.buying.doctype.purchase_order.purchase_order import (
+            get_items_from_sales_order as core_get_items_from_sales_order,
+        )
+    except Exception:
+        return []
+
+    base = core_get_items_from_sales_order(sales_order, *args, **kwargs)
+
+    # normalize to list
+    if isinstance(base, dict) and "items" in base:
+        items_list = base.get("items") or []
+        container = base
+    else:
+        items_list = base if isinstance(base, list) else []
+        container = None
+
+    try:
+        so = frappe.get_doc("Sales Order", sales_order)
+    except frappe.DoesNotExistError:
+        return base
+
+    schedule_date = getattr(so, "delivery_date", None) or frappe.utils.today()
+
+    for r in (so.get("custom_delivery_bom") or []):
+        item_code = r.get("item")
+        if not item_code:
+            continue
+
+        qty = _f(r.get("qty"))
+        row = {
+            "item_code": item_code,
+            "item_name": r.get("item_name") or _item_name(item_code),
+            "description": r.get("description") or "",
+            "qty": qty,
+            "pending_qty": qty,
+            "uom": frappe.db.get_value("Item", item_code, "stock_uom"),
+            "stock_uom": frappe.db.get_value("Item", item_code, "stock_uom"),
+            "conversion_factor": 1,
+            "schedule_date": schedule_date,
+            "supplier": None,
+            "sales_order": so.name,
+            "sales_order_item": None,
+        }
+        items_list.append(row)
+
+    if container is not None:
+        container["items"] = items_list
+        return container
+
+    return items_list
