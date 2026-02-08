@@ -9,7 +9,10 @@
   "item",
   "item_name",
   "description",
-  "qty"
+    "uom",
+    "conversion_factor",
+    "qty",
+    "custom_parent_product"
  ],
  "fields": [
   {
@@ -33,11 +36,31 @@
    "in_standard_filter": 1,
    "label": "Description"
   },
+    {
+     "fieldname": "uom",
+     "fieldtype": "Link",
+     "in_list_view": 1,
+     "label": "UOM",
+     "options": "UOM"
+    },
+    {
+     "fieldname": "conversion_factor",
+     "fieldtype": "Float",
+     "label": "Conversion Factor",
+     "precision": "6"
+    },
   {
    "fieldname": "qty",
    "fieldtype": "Float",
    "in_list_view": 1,
    "label": "QTY"
+    },
+    {
+     "fieldname": "custom_parent_product",
+     "fieldtype": "Link",
+     "label": "Parent Product",
+     "options": "Item",
+     "read_only": 1
   }
  ],
  "grid_page_length": 50,

@@ -10,13 +10,22 @@ function append_dn_items_from_rows(frm, rows) {
   if (!Array.isArray(rows) || !rows.length) return;
   // default warehouse from existing DN items (if any)
   const default_wh = (frm.doc.items || []).find(x => x.warehouse)?.warehouse || null;
+  const existing = new Set(
+    (frm.doc.items || [])
+      .filter(x => x.item_code)
+      .map(x => `${x.item_code}||${x.qty || 0}||${(x.description || "").trim()}`)
+  );
 
   rows.forEach(r => {
+    const key = `${r.item}||${r.qty || 0}||${(r.description || "").trim()}`;
+    if (existing.has(key)) return;
     const d = frm.add_child("items");
     d.item_code   = r.item;
     d.item_name   = r.item_name || r.item;
     d.description = r.description || "";
     d.qty         = r.qty || 0;
+    if ("uom" in d) d.uom = r.uom || d.uom;
+    if ("conversion_factor" in d) d.conversion_factor = r.conversion_factor || 1;
     if (default_wh) d.warehouse = default_wh;
   });
   frm.refresh_field("items");

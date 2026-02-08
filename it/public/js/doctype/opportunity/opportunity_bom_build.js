@@ -9,6 +9,7 @@
   const B_QTY        = "qty";
   const B_COST       = "custom_cost";
   const B_TOTAL      = "custom_total_cost";
+  const B_TOTAL_QTY  = "custom_total_qty";
 
   const I_CODE       = "item_code";
   const I_QTY        = "qty";
@@ -70,11 +71,27 @@
   }
 
   // --- bundle row math ---
-  function recompute_bundle_row_total(r) {
+  function map_parent_qty(frm) {
+    const map = {};
+    (frm.doc.items || []).forEach((it) => {
+      const code = s(it[I_CODE]);
+      if (!code) return;
+      map[code] = flt(it[I_QTY]);
+    });
+    return map;
+  }
+
+  function recompute_bundle_row_total(r, parentQtyMap) {
     r[B_TOTAL] = flt(r[B_QTY]) * flt(r[B_COST]);
+    if (B_TOTAL_QTY in r) {
+      const parent = s(r[B_PARENT]);
+      const parentQty = parent ? (parentQtyMap?.[parent] || 0) : 0;
+      r[B_TOTAL_QTY] = flt(r[B_QTY]) * parentQty;
+    }
   }
   function recompute_all_bundle_totals(frm) {
-    (frm.doc[BUNDLE_TABLE] || []).forEach(recompute_bundle_row_total);
+    const parentQtyMap = map_parent_qty(frm);
+    (frm.doc[BUNDLE_TABLE] || []).forEach((r) => recompute_bundle_row_total(r, parentQtyMap));
     frm.refresh_field(BUNDLE_TABLE);
   }
 
@@ -205,6 +222,7 @@
 
     // qty/rate changes always reflect totals
     [I_QTY](frm) {
+      recompute_all_bundle_totals(frm);
       push_costs_from_bundle(frm);
       recompute_item_margins(frm);
       recompute_header_totals(frm);
@@ -236,22 +254,19 @@
   // Bundle child quick hooks (if child doctype name is "Product Bundle Item")
   frappe.ui.form.on("Product Bundle Item", {
     [B_QTY](frm, cdt, cdn)  {
-      const r = locals[cdt][cdn];
-      recompute_bundle_row_total(r);
-      frm.refresh_field(BUNDLE_TABLE);
+      recompute_all_bundle_totals(frm);
       push_costs_from_bundle(frm);
       recompute_item_margins(frm);
       recompute_header_totals(frm);
     },
     [B_COST](frm, cdt, cdn) {
-      const r = locals[cdt][cdn];
-      recompute_bundle_row_total(r);
-      frm.refresh_field(BUNDLE_TABLE);
+      recompute_all_bundle_totals(frm);
       push_costs_from_bundle(frm);
       recompute_item_margins(frm);
       recompute_header_totals(frm);
     },
     [B_PARENT](frm) {
+      recompute_all_bundle_totals(frm);
       push_costs_from_bundle(frm);
       recompute_item_margins(frm);
       recompute_header_totals(frm);

@@ -7,6 +7,8 @@ function fill_qtn_delivery_bom(frm, rows) {
     d.item_name   = r.item_name || r.item;
     d.description = r.description || "";
     d.qty         = r.qty || 0;
+    if ("uom" in d) d.uom = r.uom || null;
+    if ("conversion_factor" in d) d.conversion_factor = r.conversion_factor || 1;
     // pass through parent tracking if the field exists on your child doctype
     if ("custom_parent_product" in d) d.custom_parent_product = r.custom_parent_product || null;
   });

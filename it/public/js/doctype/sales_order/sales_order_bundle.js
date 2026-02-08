@@ -11,6 +11,8 @@ function fill_so_delivery_bom(frm, rows) {
     d.item_name   = r.item_name || r.item;
     d.description = r.description || "";
     d.qty         = r.qty || 0;
+    if ("uom" in d) d.uom = r.uom || null;
+    if ("conversion_factor" in d) d.conversion_factor = r.conversion_factor || 1;
   });
   frm.refresh_field("custom_delivery_bom");
 }
@@ -59,7 +61,7 @@ function build_po_selection_dialog(frm) {
     description: r.description || "",
     qty: r.qty || 0,
     uom: r.uom,
-    conversion_factor: 1,
+    conversion_factor: r.conversion_factor || 1,
     sales_order_item: null
   }));
 

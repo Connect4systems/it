@@ -62,5 +62,16 @@
     "hidden": 1,
     "read_only": 1,
     "precision": "3"
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Product Bundle Item-custom_total_qty",
+    "dt": "Product Bundle Item",
+    "fieldname": "custom_total_qty",
+    "fieldtype": "Float",
+    "label": "Total Qty",
+    "insert_after": "custom_base_qty",
+    "precision": "3",
+    "read_only": 1
   }
 ]

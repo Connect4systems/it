@@ -31,12 +31,20 @@ def _delivery_bom_rows_from_opportunity(opp) -> list[dict]:
         item_code = r.get("item_code")
         if not item_code:
             continue
+        total_qty = r.get("custom_total_qty")
+        qty = _f(total_qty) if total_qty is not None else _f(r.get("qty"))
+        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        conversion_factor = _f(r.get("conversion_factor") or 1)
+        parent_product = r.get("custom_product") or r.get("custom_parent_product")
         rows.append(
             {
                 "item": item_code,
                 "item_name": _item_name(item_code),
                 "description": r.get("description") or "",
-                "qty": _f(r.get("qty")),
+                "qty": qty,
+                "uom": uom,
+                "conversion_factor": conversion_factor,
+                "custom_parent_product": parent_product,
             }
         )
     return rows
@@ -48,11 +56,15 @@ def _delivery_bom_rows_from_doc(doc) -> list[dict]:
         item_code = r.get("item") or r.get("item_code")
         if not item_code:
             continue
+        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        conversion_factor = _f(r.get("conversion_factor") or 1)
         row = {
             "item": item_code,
             "item_name": r.get("item_name") or _item_name(item_code),
             "description": r.get("description") or "",
             "qty": _f(r.get("qty")),
+            "uom": uom,
+            "conversion_factor": conversion_factor,
         }
         if hasattr(r, "custom_parent_product"):
             row["custom_parent_product"] = r.get("custom_parent_product")
@@ -89,11 +101,21 @@ def make_quotation_with_bundle(source_name: str, target_doc: dict | None = None)
         item_code = r.get("item_code")
         if not item_code:
             continue
+        total_qty = r.get("custom_total_qty")
+        qty = _f(total_qty) if total_qty is not None else _f(r.get("qty"))
+        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        conversion_factor = _f(r.get("conversion_factor") or 1)
         row = qtn.append("custom_delivery_bom", {})
         row.item        = item_code
         row.item_name   = frappe.db.get_value("Item", item_code, "item_name") or item_code
         row.description = r.get("description") or ""
-        row.qty         = _f(r.get("qty"))
+        row.qty         = qty
+        if hasattr(row, "uom"):
+            row.uom = uom
+        if hasattr(row, "conversion_factor"):
+            row.conversion_factor = conversion_factor
+        if hasattr(row, "custom_parent_product"):
+            row.custom_parent_product = r.get("custom_product") or r.get("custom_parent_product")
 
     qtn.flags.ignore_permissions = True
     try:
@@ -128,16 +150,62 @@ def make_sales_order_with_bundle(source_name: str, target_doc: dict | None = Non
     if not hasattr(so, "custom_delivery_bom"):
         return so
 
+    so_item_meta = frappe.get_meta("Sales Order Item")
+
     so.custom_delivery_bom = []
     for r in (qtn.get("custom_delivery_bom") or []):
         item_code = r.get("item")
         if not item_code:
             continue
+
+        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        conversion_factor = _f(r.get("conversion_factor") or 1)
+
         row = so.append("custom_delivery_bom", {})
         row.item        = item_code
         row.item_name   = r.get("item_name") or frappe.db.get_value("Item", item_code, "item_name") or item_code
         row.description = r.get("description") or ""
         row.qty         = _f(r.get("qty"))
+        if hasattr(row, "uom"):
+            row.uom = uom
+        if hasattr(row, "conversion_factor"):
+            row.conversion_factor = conversion_factor
+        if hasattr(row, "custom_parent_product"):
+            row.custom_parent_product = r.get("custom_parent_product")
+
+    existing = {
+        (d.item_code, _f(d.qty), (d.description or "").strip(), getattr(d, "uom", None))
+        for d in (so.items or [])
+        if d.item_code
+    }
+
+    for r in (so.get("custom_delivery_bom") or []):
+        item_code = r.get("item")
+        if not item_code:
+            continue
+
+        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        conversion_factor = _f(r.get("conversion_factor") or 1)
+        desc = r.get("description") or ""
+        qty = _f(r.get("qty"))
+        key = (item_code, qty, desc.strip(), uom)
+        if key in existing:
+            continue
+
+        d = so.append("items", {})
+        d.item_code = item_code
+        d.item_name = r.get("item_name") or _item_name(item_code)
+        d.description = desc
+        d.qty = qty
+        if _has(so_item_meta, "uom"):
+            d.uom = uom
+        if _has(so_item_meta, "conversion_factor"):
+            d.conversion_factor = conversion_factor
+        if _has(so_item_meta, "price_list_rate"):
+            d.price_list_rate = 0
+        if _has(so_item_meta, "base_rate"):
+            d.base_rate = 0
+        d.rate = 0
 
     so.flags.ignore_permissions = True
     try:
@@ -170,16 +238,30 @@ def make_delivery_note_merged(source_name: str, target_doc: dict | None = None):
     except frappe.DoesNotExistError:
         return dn
 
+    existing = {
+        (d.item_code, _f(d.qty), (d.description or "").strip())
+        for d in (dn.items or [])
+        if d.item_code
+    }
+
+    dn_item_meta = frappe.get_meta("Delivery Note Item")
+
     for r in (so.get("custom_delivery_bom") or []):
         item_code = r.get("item")
         if not item_code:
+            continue
+
+        key = (item_code, _f(r.get("qty")), (r.get("description") or "").strip())
+        if key in existing:
             continue
 
         dnr = dn.append("items", {})
         dnr.item_code   = item_code
         dnr.item_name   = r.get("item_name") or frappe.db.get_value("Item", item_code, "item_name") or item_code
         dnr.description = r.get("description") or ""
-        dnr.uom         = frappe.db.get_value("Item", item_code, "stock_uom")
+        dnr.uom         = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        if _has(dn_item_meta, "conversion_factor"):
+            dnr.conversion_factor = _f(r.get("conversion_factor") or 1)
         dnr.qty         = _f(r.get("qty"))
 
         # DO NOT set sales order links on these component rows
@@ -241,7 +323,9 @@ def make_sales_invoice_merged(source_name: str, target_doc: dict | None = None):
         sir.item_code   = item_code
         sir.item_name   = r.get("item_name") or _item_name(item_code)
         sir.description = r.get("description") or ""
-        sir.uom         = frappe.db.get_value("Item", item_code, "stock_uom")
+        sir.uom         = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        if hasattr(sir, "conversion_factor"):
+            sir.conversion_factor = _f(r.get("conversion_factor") or 1)
         sir.qty         = _f(r.get("qty"))
         sir.rate = 0
         sir.discount_percentage = 0
@@ -480,9 +564,9 @@ def get_items_merged(source_name: str, target_doc: dict | None = None):
             "description": r.get("description") or "",
             "qty": qty,
             "pending_qty": qty,
-            "uom": frappe.db.get_value("Item", item_code, "stock_uom"),
+            "uom": r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom"),
             "stock_uom": frappe.db.get_value("Item", item_code, "stock_uom"),
-            "conversion_factor": 1,
+            "conversion_factor": _f(r.get("conversion_factor") or 1),
             "schedule_date": schedule_date,
             "supplier": None,
             "sales_order_item": None,
@@ -538,9 +622,9 @@ def get_items_from_sales_order_merged(sales_order: str, *args, **kwargs):
             "description": r.get("description") or "",
             "qty": qty,
             "pending_qty": qty,
-            "uom": frappe.db.get_value("Item", item_code, "stock_uom"),
+            "uom": r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom"),
             "stock_uom": frappe.db.get_value("Item", item_code, "stock_uom"),
-            "conversion_factor": 1,
+            "conversion_factor": _f(r.get("conversion_factor") or 1),
             "schedule_date": schedule_date,
             "supplier": None,
             "sales_order": so.name,

@@ -7,6 +7,7 @@ PARENT_BUNDLE_TABLE = "custom_product_bundle"      # child table field on Opport
 CHILD_DOCTYPE       = "Product Bundle Item"        # child doctype name
 PRODUCT_FIELD       = "custom_product"             # child column linking to parent item (Link -> Item)
 CHILD_TOTAL_FIELD   = "custom_total_cost"          # TOTAL = custom_cost * qty
+CHILD_TOTAL_QTY      = "custom_total_qty"           # TOTAL QTY = qty * parent item qty
 PARENT_COST_TOTAL   = "custom_purchase_rate"       # parent field to write (Σ child totals)
 MARGIN_FIELD        = "custom_margin"
 # ----------------------------------------
@@ -90,6 +91,11 @@ def on_validate(doc, method=None):
 
     # ---- child totals & rollup ----
     per_parent_sum: dict[str, float] = {}
+    parent_qty_map = {
+        getattr(it, "item_code", None): flt(getattr(it, "qty", 0))
+        for it in (doc.items or [])
+        if getattr(it, "item_code", None)
+    }
 
     for ch in (getattr(doc, PARENT_BUNDLE_TABLE) or []):
         parent_item = getattr(ch, PRODUCT_FIELD, None)
@@ -102,6 +108,10 @@ def on_validate(doc, method=None):
 
         if _has(child_meta, CHILD_TOTAL_FIELD):
             setattr(ch, CHILD_TOTAL_FIELD, line_total)
+
+        if _has(child_meta, CHILD_TOTAL_QTY):
+            parent_qty = parent_qty_map.get(parent_item, 0)
+            setattr(ch, CHILD_TOTAL_QTY, qty * parent_qty)
 
         per_parent_sum[parent_item] = per_parent_sum.get(parent_item, 0.0) + line_total
 
