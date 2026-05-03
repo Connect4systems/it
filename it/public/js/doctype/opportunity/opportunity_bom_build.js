@@ -53,7 +53,7 @@
     frm.set_query(I_CODE, "items", (doc, cdt, cdn) => {
       const row = locals[cdt][cdn] || {};
       if (cint(row[I_MAIN])) {
-        return { filters: { is_stock_item: 0 } };
+        return { filters: { is_stock_item: 0, is_fixed_asset: 0 } };
       }
       return {};
     });
@@ -63,12 +63,13 @@
     const row = locals[cdt]?.[cdn];
     if (!row || !cint(row[I_MAIN]) || !s(row[I_CODE])) return;
 
-    frappe.db.get_value("Item", row[I_CODE], "is_stock_item").then((r) => {
+    frappe.db.get_value("Item", row[I_CODE], ["is_stock_item", "is_fixed_asset"]).then((r) => {
       const is_stock_item = cint(r?.message?.is_stock_item);
-      if (!is_stock_item) return;
+      const is_fixed_asset = cint(r?.message?.is_fixed_asset);
+      if (!is_stock_item && !is_fixed_asset) return;
 
       frappe.model.set_value(cdt, cdn, I_CODE, "");
-      frappe.msgprint(__("Main row accepts only Service Item (Maintain Stock unchecked)."));
+      frappe.msgprint(__("Main row accepts only Service Item (Maintain Stock unchecked and not Fixed Asset)."));
     });
   }
 
