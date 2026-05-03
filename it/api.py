@@ -12,6 +12,13 @@ def _f(v):
         return 0.0
 
 
+def _i(v):
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
 def _has(meta, fieldname: str) -> bool:
     try:
         return bool(meta.get_field(fieldname))
@@ -23,6 +30,45 @@ def _item_name(item_code: str) -> str:
     if not item_code:
         return ""
     return frappe.db.get_value("Item", item_code, "item_name") or item_code
+
+
+def _upsert_standard_product_bundle(parent_item_code: str, components: list[dict]) -> str | None:
+    """
+    Ensure there is a standard Product Bundle for `parent_item_code` and
+    replace its component table with the given rows.
+    """
+    if not parent_item_code:
+        return None
+
+    existing_name = frappe.db.get_value("Product Bundle", {"new_item_code": parent_item_code}, "name")
+    if existing_name:
+        pb = frappe.get_doc("Product Bundle", existing_name)
+    else:
+        pb = frappe.new_doc("Product Bundle")
+        pb.new_item_code = parent_item_code
+
+    pb.items = []
+    for comp in components:
+        item_code = comp.get("item_code")
+        qty = _f(comp.get("qty"))
+        if not item_code or qty <= 0:
+            continue
+
+        row = pb.append("items", {})
+        row.item_code = item_code
+        row.qty = qty
+        if hasattr(row, "description"):
+            row.description = comp.get("description") or ""
+        if hasattr(row, "uom"):
+            row.uom = comp.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+
+    pb.flags.ignore_permissions = True
+    if existing_name:
+        pb.save()
+    else:
+        pb.insert()
+
+    return pb.name
 
 
 def _delivery_bom_rows_from_opportunity(opp) -> list[dict]:
@@ -73,13 +119,14 @@ def _delivery_bom_rows_from_doc(doc) -> list[dict]:
 
 
 # ----------------------------------------------------------------------
-# 1) Opportunity -> Quotation   (copy Product Bundle -> custom_delivery_bom)
+# 1) Opportunity -> Quotation   (prepare standard Product Bundle for MAIN items)
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def make_quotation_with_bundle(source_name: str, target_doc: dict | None = None):
     """
-    Call ERPNext core Opportunity->Quotation mapping, then also copy:
-      Opportunity.custom_product_bundle  -->  Quotation.custom_delivery_bom
+    Call ERPNext core Opportunity->Quotation mapping, then ensure each MAIN
+    Opportunity Item has a standard Product Bundle built from
+    Opportunity.custom_product_bundle rows linked by custom_product.
     """
     from erpnext.crm.doctype.opportunity.opportunity import (
         make_quotation as core_make_quotation,
@@ -92,33 +139,34 @@ def make_quotation_with_bundle(source_name: str, target_doc: dict | None = None)
     except frappe.DoesNotExistError:
         return qtn
 
-    # ensure child exists, then (re)fill
-    if not hasattr(qtn, "custom_delivery_bom"):
-        return qtn
-
-    qtn.custom_delivery_bom = []
+    components_by_parent: dict[str, list[dict]] = {}
     for r in (opp.get("custom_product_bundle") or []):
+        parent = r.get("custom_product") or r.get("custom_parent_product")
         item_code = r.get("item_code")
-        if not item_code:
+        qty = _f(r.get("qty"))  # per-one qty for standard Product Bundle master
+        if not parent or not item_code or qty <= 0:
             continue
-        total_qty = r.get("custom_total_qty")
-        qty = _f(total_qty) if total_qty is not None else _f(r.get("qty"))
-        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
-        conversion_factor = _f(r.get("conversion_factor") or 1)
-        row = qtn.append("custom_delivery_bom", {})
-        row.item        = item_code
-        row.item_name   = frappe.db.get_value("Item", item_code, "item_name") or item_code
-        row.description = r.get("description") or ""
-        row.qty         = qty
-        if hasattr(row, "uom"):
-            row.uom = uom
-        if hasattr(row, "conversion_factor"):
-            row.conversion_factor = conversion_factor
-        if hasattr(row, "custom_parent_product"):
-            row.custom_parent_product = r.get("custom_product") or r.get("custom_parent_product")
+
+        components_by_parent.setdefault(parent, []).append(
+            {
+                "item_code": item_code,
+                "qty": qty,
+                "description": r.get("description") or "",
+                "uom": r.get("uom"),
+            }
+        )
+
+    for it in (opp.get("items") or []):
+        parent_item = it.get("item_code")
+        if not parent_item or not _i(it.get("custom_main")):
+            continue
+        _upsert_standard_product_bundle(parent_item, components_by_parent.get(parent_item, []))
 
     qtn.flags.ignore_permissions = True
     try:
+        # Make sure standard packed items can be rebuilt from Product Bundle.
+        if hasattr(qtn, "set_packed_items"):
+            qtn.set_packed_items()
         qtn.run_method("set_missing_values")
         qtn.run_method("calculate_taxes_and_totals")
     except Exception:
@@ -128,159 +176,27 @@ def make_quotation_with_bundle(source_name: str, target_doc: dict | None = None)
 
 
 # ----------------------------------------------------------------------
-# 2) Quotation -> Sales Order   (carry custom_delivery_bom forward)
+# 2) Quotation -> Sales Order   (standard ERPNext flow)
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def make_sales_order_with_bundle(source_name: str, target_doc: dict | None = None):
-    """
-    Call ERPNext core Quotation->Sales Order mapping, then copy:
-      Quotation.custom_delivery_bom  -->  Sales Order.custom_delivery_bom
-    """
+    """Use ERPNext standard Quotation -> Sales Order mapping."""
     from erpnext.selling.doctype.quotation.quotation import (
         make_sales_order as core_make_sales_order,
     )
-
-    so = core_make_sales_order(source_name, target_doc)
-
-    try:
-        qtn = frappe.get_doc("Quotation", source_name)
-    except frappe.DoesNotExistError:
-        return so
-
-    if not hasattr(so, "custom_delivery_bom"):
-        return so
-
-    so_item_meta = frappe.get_meta("Sales Order Item")
-
-    so.custom_delivery_bom = []
-    for r in (qtn.get("custom_delivery_bom") or []):
-        item_code = r.get("item")
-        if not item_code:
-            continue
-
-        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
-        conversion_factor = _f(r.get("conversion_factor") or 1)
-
-        row = so.append("custom_delivery_bom", {})
-        row.item        = item_code
-        row.item_name   = r.get("item_name") or frappe.db.get_value("Item", item_code, "item_name") or item_code
-        row.description = r.get("description") or ""
-        row.qty         = _f(r.get("qty"))
-        if hasattr(row, "uom"):
-            row.uom = uom
-        if hasattr(row, "conversion_factor"):
-            row.conversion_factor = conversion_factor
-        if hasattr(row, "custom_parent_product"):
-            row.custom_parent_product = r.get("custom_parent_product")
-
-    existing = {
-        (d.item_code, _f(d.qty), (d.description or "").strip(), getattr(d, "uom", None))
-        for d in (so.items or [])
-        if d.item_code
-    }
-
-    for r in (so.get("custom_delivery_bom") or []):
-        item_code = r.get("item")
-        if not item_code:
-            continue
-
-        uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
-        conversion_factor = _f(r.get("conversion_factor") or 1)
-        desc = r.get("description") or ""
-        qty = _f(r.get("qty"))
-        key = (item_code, qty, desc.strip(), uom)
-        if key in existing:
-            continue
-
-        d = so.append("items", {})
-        d.item_code = item_code
-        d.item_name = r.get("item_name") or _item_name(item_code)
-        d.description = desc
-        d.qty = qty
-        if _has(so_item_meta, "uom"):
-            d.uom = uom
-        if _has(so_item_meta, "conversion_factor"):
-            d.conversion_factor = conversion_factor
-        if _has(so_item_meta, "price_list_rate"):
-            d.price_list_rate = 0
-        if _has(so_item_meta, "base_rate"):
-            d.base_rate = 0
-        d.rate = 0
-
-    so.flags.ignore_permissions = True
-    try:
-        so.run_method("set_missing_values")
-        so.run_method("calculate_taxes_and_totals")
-    except Exception:
-        pass
-
-    return so
+    return core_make_sales_order(source_name, target_doc)
 
 
 # ----------------------------------------------------------------------
-# 3) Sales Order -> Delivery Note   (append components, no SO link, rate=0)
+# 3) Sales Order -> Delivery Note   (standard ERPNext flow)
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def make_delivery_note_merged(source_name: str, target_doc: dict | None = None):
-    """
-    1) Use ERPNext core mapper for SO Items (keeps so_detail links).
-    2) Append extra rows from Sales Order.custom_delivery_bom without SO linkage,
-       and with rate = 0 (parent SO item carries the price).
-    """
+    """Use ERPNext standard Sales Order -> Delivery Note mapping."""
     from erpnext.selling.doctype.sales_order.sales_order import (
         make_delivery_note as core_make_delivery_note,
     )
-
-    dn = core_make_delivery_note(source_name, target_doc)
-
-    try:
-        so = frappe.get_doc("Sales Order", source_name)
-    except frappe.DoesNotExistError:
-        return dn
-
-    existing = {
-        (d.item_code, _f(d.qty), (d.description or "").strip())
-        for d in (dn.items or [])
-        if d.item_code
-    }
-
-    dn_item_meta = frappe.get_meta("Delivery Note Item")
-
-    for r in (so.get("custom_delivery_bom") or []):
-        item_code = r.get("item")
-        if not item_code:
-            continue
-
-        key = (item_code, _f(r.get("qty")), (r.get("description") or "").strip())
-        if key in existing:
-            continue
-
-        dnr = dn.append("items", {})
-        dnr.item_code   = item_code
-        dnr.item_name   = r.get("item_name") or frappe.db.get_value("Item", item_code, "item_name") or item_code
-        dnr.description = r.get("description") or ""
-        dnr.uom         = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
-        if _has(dn_item_meta, "conversion_factor"):
-            dnr.conversion_factor = _f(r.get("conversion_factor") or 1)
-        dnr.qty         = _f(r.get("qty"))
-
-        # DO NOT set sales order links on these component rows
-        # dnr.against_sales_order = None
-        # dnr.sales_order = None
-        # dnr.so_detail = None
-
-        dnr.rate = 0
-        dnr.discount_percentage = 0
-        dnr.discount_amount = 0
-
-    dn.flags.ignore_permissions = True
-    try:
-        dn.run_method("set_missing_values")
-        dn.run_method("calculate_taxes_and_totals")
-    except Exception:
-        pass
-
-    return dn
+    return core_make_delivery_note(source_name, target_doc)
 
 
 # ----------------------------------------------------------------------
