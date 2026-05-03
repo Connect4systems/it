@@ -48,6 +48,30 @@
     });
   }
 
+  // Main rows must use service items (Maintain Stock = unchecked)
+  function set_items_item_code_query(frm) {
+    frm.set_query(I_CODE, "items", (doc, cdt, cdn) => {
+      const row = locals[cdt][cdn] || {};
+      if (cint(row[I_MAIN])) {
+        return { filters: { is_stock_item: 0 } };
+      }
+      return {};
+    });
+  }
+
+  function enforce_main_service_item(frm, cdt, cdn) {
+    const row = locals[cdt]?.[cdn];
+    if (!row || !cint(row[I_MAIN]) || !s(row[I_CODE])) return;
+
+    frappe.db.get_value("Item", row[I_CODE], "is_stock_item").then((r) => {
+      const is_stock_item = cint(r?.message?.is_stock_item);
+      if (!is_stock_item) return;
+
+      frappe.model.set_value(cdt, cdn, I_CODE, "");
+      frappe.msgprint(__("Main row accepts only Service Item (Maintain Stock unchecked)."));
+    });
+  }
+
   // allow saving with 0 prices
   function relax_selling_mandatory(frm) {
     const grid = frm.get_field("items")?.grid;
@@ -177,14 +201,17 @@
     setup(frm) {
       relax_selling_mandatory(frm);
       set_bundle_product_query(frm);
+      set_items_item_code_query(frm);
     },
     onload_post_render(frm) {
       relax_selling_mandatory(frm);
       set_bundle_product_query(frm);
+      set_items_item_code_query(frm);
     },
     refresh(frm) {
       relax_selling_mandatory(frm);
       set_bundle_product_query(frm);
+      set_items_item_code_query(frm);
       bind_bundle_grid(frm);
 
       // full recompute on load
@@ -215,9 +242,15 @@
       const row = locals[cdt][cdn];
       toggle_cost_edit(frm, row);
       set_bundle_product_query(frm);
+      set_items_item_code_query(frm);
+      enforce_main_service_item(frm, cdt, cdn);
       push_costs_from_bundle(frm);
       recompute_item_margins(frm);
       recompute_header_totals(frm);
+    },
+
+    [I_CODE](frm, cdt, cdn) {
+      enforce_main_service_item(frm, cdt, cdn);
     },
 
     // qty/rate changes always reflect totals
