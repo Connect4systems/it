@@ -49,6 +49,21 @@ override_whitelisted_methods = {
         "it.api.get_items_from_sales_order_merged",
 }
 
+doc_events = {
+    "Material Request": {
+        "validate": "it.handlers.sales_partner_dimension.sync_material_request_sales_partner",
+    },
+    "Purchase Order": {
+        "validate": "it.handlers.sales_partner_dimension.sync_purchase_order_sales_partner",
+    },
+    "Purchase Receipt": {
+        "validate": "it.handlers.sales_partner_dimension.sync_purchase_receipt_sales_partner",
+    },
+    "Purchase Invoice": {
+        "validate": "it.handlers.sales_partner_dimension.sync_purchase_invoice_sales_partner",
+    },
+}
+
 
 
 # Includes in <head>
