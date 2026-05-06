@@ -27,6 +27,7 @@ app_license = "mit"
 doctype_js = {
     "Opportunity": "public/js/doctype/opportunity/opportunity_bom_build.js",
     "Sales Order": "public/js/doctype/sales_order/sales_order_bundle.js",
+    "Sales Invoice": "public/js/doctype/sales_invoice/sales_invoice_partner_sync.js",
 }
 
 
