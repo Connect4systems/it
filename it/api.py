@@ -604,19 +604,19 @@ def backfill_sales_invoice_item_sales_partner(dry_run: int = 1):
         return result
 
 
-    def _has_column(doctype: str, column: str) -> bool:
-        try:
-            return bool(frappe.db.has_column(doctype, column))
-        except Exception:
-            return False
+def _has_column(doctype: str, column: str) -> bool:
+    try:
+        return bool(frappe.db.has_column(doctype, column))
+    except Exception:
+        return False
 
 
-    def _count_sql(query: str) -> int:
-        return _i((frappe.db.sql(query) or [[0]])[0][0])
+def _count_sql(query: str) -> int:
+    return _i((frappe.db.sql(query) or [[0]])[0][0])
 
 
-    @frappe.whitelist()
-    def backfill_purchase_chain_sales_partner(dry_run: int = 1):
+@frappe.whitelist()
+def backfill_purchase_chain_sales_partner(dry_run: int = 1):
         """
         Backfill row-level Sales Partner in sequence:
           1) Material Request Item
