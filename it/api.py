@@ -553,3 +553,52 @@ def get_items_from_sales_order_merged(sales_order: str, *args, **kwargs):
         return container
 
     return items_list
+
+
+# ----------------------------------------------------------------------
+# 9) Bench utility: backfill Sales Partner on Sales Invoice Items
+# ----------------------------------------------------------------------
+def backfill_sales_invoice_item_sales_partner(dry_run: int = 1):
+        """
+        Sync all Sales Invoice Item.sales_partner from parent Sales Invoice.sales_partner.
+
+        Run (preview only):
+            bench --site <site> execute it.api.backfill_sales_invoice_item_sales_partner
+
+        Run (apply updates):
+            bench --site <site> execute it.api.backfill_sales_invoice_item_sales_partner --kwargs "{'dry_run': 0}"
+        """
+        dry_run = _i(dry_run)
+
+        to_update = frappe.db.sql(
+                """
+                SELECT COUNT(*)
+                FROM `tabSales Invoice Item` sii
+                INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+                WHERE sii.parenttype = 'Sales Invoice'
+                    AND IFNULL(sii.sales_partner, '') != IFNULL(si.sales_partner, '')
+                """
+        )[0][0]
+
+        result = {
+                "dry_run": bool(dry_run),
+                "rows_needing_update": _i(to_update),
+                "rows_updated": 0,
+        }
+
+        if dry_run or not to_update:
+                return result
+
+        frappe.db.sql(
+                """
+                UPDATE `tabSales Invoice Item` sii
+                INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+                SET sii.sales_partner = si.sales_partner
+                WHERE sii.parenttype = 'Sales Invoice'
+                    AND IFNULL(sii.sales_partner, '') != IFNULL(si.sales_partner, '')
+                """
+        )
+        frappe.db.commit()
+
+        result["rows_updated"] = _i(to_update)
+        return result
