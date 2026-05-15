@@ -39,7 +39,7 @@ frappe.query_reports["Bundle Gross Profit"] = {
 		},
 		{
 			fieldname: "parent_item",
-			label: __("Parent Bundle Item"),
+			label: __("Item"),
 			fieldtype: "Link",
 			options: "Item",
 		},

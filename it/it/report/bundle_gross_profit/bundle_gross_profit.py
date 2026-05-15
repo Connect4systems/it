@@ -52,35 +52,37 @@ def get_data(filters):
 
 	for item in invoice_items:
 		components = _get_components_for_invoice_item(item)
-		if not components:
-			continue
-
 		component_rows = []
-		total_cost = 0
-		for component in components:
-			qty = abs(flt(component.get("qty")))
-			avg_cost, cost_amount = _get_component_cost(component, item)
-			total_cost += cost_amount
+		is_bundle = bool(components)
 
-			component_rows.append(
-				{
-					"indent": 1,
-					"row_label": component.get("item_name") or component.get("item_code"),
-					"sales_invoice": item.sales_invoice,
-					"delivery_note": item.delivery_note,
-					"posting_date": item.posting_date,
-					"customer": item.customer,
-					"sales_partner": item.sales_partner,
-					"parent_item": item.item_code,
-					"component_item": component.get("item_code"),
-					"qty": qty,
-					"average_cost": avg_cost,
-					"cost_amount": cost_amount,
-					"sales_amount": 0,
-					"gross_profit": None,
-					"gross_profit_percent": None,
-				}
-			)
+		if is_bundle:
+			total_cost = 0
+			for component in components:
+				qty = abs(flt(component.get("qty")))
+				avg_cost, cost_amount = _get_component_cost(component)
+				total_cost += cost_amount
+
+				component_rows.append(
+					{
+						"indent": 1,
+						"row_label": component.get("item_name") or component.get("item_code"),
+						"sales_invoice": item.sales_invoice,
+						"delivery_note": item.delivery_note,
+						"posting_date": item.posting_date,
+						"customer": item.customer,
+						"sales_partner": item.sales_partner,
+						"parent_item": item.item_code,
+						"component_item": component.get("item_code"),
+						"qty": qty,
+						"average_cost": avg_cost,
+						"cost_amount": cost_amount,
+						"sales_amount": 0,
+						"gross_profit": None,
+						"gross_profit_percent": None,
+					}
+				)
+		else:
+			average_cost, total_cost = _get_invoice_item_cost(item)
 
 		sales_amount = flt(item.base_net_amount or item.net_amount or item.amount)
 		gross_profit = sales_amount - total_cost
@@ -98,7 +100,7 @@ def get_data(filters):
 				"parent_item": item.item_code,
 				"component_item": None,
 				"qty": flt(item.qty),
-				"average_cost": None,
+				"average_cost": None if is_bundle else average_cost,
 				"cost_amount": total_cost,
 				"sales_amount": sales_amount,
 				"gross_profit": gross_profit,
@@ -128,6 +130,11 @@ def _get_sales_invoice_items(filters):
 	if filters.get("delivery_note"):
 		conditions.append("sii.delivery_note = %(delivery_note)s")
 
+	optional_fields = []
+	for fieldname in ("stock_qty", "incoming_rate", "valuation_rate", "buying_amount", "base_amount"):
+		if _has_column("Sales Invoice Item", fieldname):
+			optional_fields.append(f"sii.{fieldname}")
+
 	return frappe.db.sql(
 		f"""
 		SELECT
@@ -144,6 +151,7 @@ def _get_sales_invoice_items(filters):
 			sii.base_net_amount,
 			sii.delivery_note,
 			sii.dn_detail
+			{", " + ", ".join(optional_fields) if optional_fields else ""}
 		FROM `tabSales Invoice` si
 		INNER JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
 		WHERE {" AND ".join(conditions)}
@@ -212,7 +220,7 @@ def _get_packed_items(conditions, params):
 	)
 
 
-def _get_component_cost(component, invoice_item):
+def _get_component_cost(component):
 	qty = abs(flt(component.get("qty")))
 	if not qty:
 		return 0, 0
@@ -232,6 +240,77 @@ def _get_component_cost(component, invoice_item):
 		)
 
 	return avg_cost, qty * avg_cost
+
+
+def _get_invoice_item_cost(item):
+	qty = abs(flt(item.get("stock_qty") or item.get("qty")))
+	if not qty:
+		return 0, 0
+
+	avg_cost = _get_invoice_item_stock_ledger_average(item)
+
+	if not avg_cost and flt(item.get("buying_amount")):
+		return flt(item.get("buying_amount")) / qty, flt(item.get("buying_amount"))
+
+	if not avg_cost:
+		for fieldname in ("incoming_rate", "valuation_rate"):
+			if item.get(fieldname):
+				avg_cost = flt(item.get(fieldname))
+				break
+
+	if not avg_cost:
+		avg_cost = flt(
+			frappe.db.get_value("Item", item.get("item_code"), "valuation_rate")
+			or frappe.db.get_value("Item", item.get("item_code"), "last_purchase_rate")
+		)
+
+	return avg_cost, qty * avg_cost
+
+
+def _get_invoice_item_stock_ledger_average(item):
+	if item.get("delivery_note"):
+		conditions = [
+			"voucher_type = 'Delivery Note'",
+			"voucher_no = %(delivery_note)s",
+			"item_code = %(item_code)s",
+			"actual_qty < 0",
+		]
+		params = {
+			"delivery_note": item.get("delivery_note"),
+			"dn_detail": item.get("dn_detail"),
+			"item_code": item.get("item_code"),
+		}
+
+		if _has_column("Stock Ledger Entry", "voucher_detail_no") and item.get("dn_detail"):
+			detail_cost = _query_stock_ledger_average(conditions + ["voucher_detail_no = %(dn_detail)s"], params)
+			if detail_cost:
+				return detail_cost
+
+		cost = _query_stock_ledger_average(conditions, params)
+		if cost:
+			return cost
+
+	conditions = [
+		"voucher_type = 'Sales Invoice'",
+		"voucher_no = %(sales_invoice)s",
+		"item_code = %(item_code)s",
+		"actual_qty < 0",
+	]
+	params = {
+		"sales_invoice": item.get("sales_invoice"),
+		"sales_invoice_item": item.get("sales_invoice_item"),
+		"item_code": item.get("item_code"),
+	}
+
+	if _has_column("Stock Ledger Entry", "voucher_detail_no") and item.get("sales_invoice_item"):
+		detail_cost = _query_stock_ledger_average(
+			conditions + ["voucher_detail_no = %(sales_invoice_item)s"],
+			params,
+		)
+		if detail_cost:
+			return detail_cost
+
+	return _query_stock_ledger_average(conditions, params)
 
 
 def _get_stock_ledger_average(component):
