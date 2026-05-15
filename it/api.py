@@ -604,176 +604,193 @@ def backfill_sales_invoice_item_sales_partner(dry_run: int = 1):
         return result
 
 
-    def _has_column(doctype: str, column: str) -> bool:
+def _has_column(doctype: str, column: str) -> bool:
         try:
             return bool(frappe.db.has_column(doctype, column))
         except Exception:
             return False
 
 
-    def _count_sql(query: str) -> int:
+def _count_sql(query: str) -> int:
         return _i((frappe.db.sql(query) or [[0]])[0][0])
 
 
-    @frappe.whitelist()
-    def backfill_purchase_chain_sales_partner(dry_run: int = 1):
+@frappe.whitelist()
+def backfill_purchase_chain_sales_partner(dry_run: int = 1):
+    """
+    Backfill row-level Sales Partner in sequence:
+      1) Material Request Item
+      2) Purchase Order Item
+      3) Purchase Receipt Item
+      4) Purchase Invoice Item
+
+    Dry run:
+      bench --site <site> execute it.api.backfill_purchase_chain_sales_partner
+
+    Apply:
+      bench --site <site> execute it.api.backfill_purchase_chain_sales_partner --kwargs "{'dry_run': 0}"
+    """
+    dry_run = _i(dry_run)
+
+    has_soi_sp = _has_column("Sales Order Item", "sales_partner")
+    has_mri_sp = _has_column("Material Request Item", "sales_partner")
+    has_poi_sp = _has_column("Purchase Order Item", "sales_partner")
+    has_pri_sp = _has_column("Purchase Receipt Item", "sales_partner")
+    has_pii_sp = _has_column("Purchase Invoice Item", "sales_partner")
+    has_mr_header_sp = _has_column("Material Request", "custom_sales_partner")
+
+    soi_partner = "NULLIF(soi.sales_partner, '')" if has_soi_sp else "NULL"
+    mri_partner = "NULLIF(mri.sales_partner, '')" if has_mri_sp else "NULL"
+    poi_partner = "NULLIF(poi.sales_partner, '')" if has_poi_sp else "NULL"
+    pri_partner = "NULLIF(pri.sales_partner, '')" if has_pri_sp else "NULL"
+    mr_header_partner = "NULLIF(mr.custom_sales_partner, '')" if has_mr_header_sp else "NULL"
+
+    result = {
+        "dry_run": bool(dry_run),
+        "sequence": ["Material Request", "Purchase Order", "Purchase Receipt", "Purchase Invoice"],
+        "counts": {
+            "material_request_items_needing_update": 0,
+            "material_request_items_updated": 0,
+            "material_request_headers_updated": 0,
+            "purchase_order_items_needing_update": 0,
+            "purchase_order_items_updated": 0,
+            "purchase_receipt_items_needing_update": 0,
+            "purchase_receipt_items_updated": 0,
+            "purchase_invoice_items_needing_update": 0,
+            "purchase_invoice_items_updated": 0,
+        },
+        "skipped": [],
+    }
+
+    # 1) Material Request Item from SO item/header
+    if not has_mri_sp:
+        result["skipped"].append("Material Request Item.sales_partner column not found")
+    else:
+        mr_source = f"COALESCE({soi_partner}, NULLIF(so.sales_partner, ''))"
+        mr_where = f"{mr_source} IS NOT NULL AND IFNULL(mri.sales_partner, '') != {mr_source}"
+
+        mr_count_sql = f"""
+            SELECT COUNT(*)
+            FROM `tabMaterial Request Item` mri
+            LEFT JOIN `tabSales Order Item` soi ON soi.name = mri.sales_order_item
+            LEFT JOIN `tabSales Order` so
+                ON so.name = COALESCE(NULLIF(mri.sales_order, ''), soi.parent)
+            WHERE mri.parenttype = 'Material Request'
+              AND {mr_where}
         """
-        Backfill row-level Sales Partner in sequence:
-          1) Material Request Item
-          2) Purchase Order Item
-          3) Purchase Receipt Item
-          4) Purchase Invoice Item
+        mr_needs = _count_sql(mr_count_sql)
+        result["counts"]["material_request_items_needing_update"] = mr_needs
 
-        Dry run:
-          bench --site <site> execute it.api.backfill_purchase_chain_sales_partner
-
-        Apply:
-          bench --site <site> execute it.api.backfill_purchase_chain_sales_partner --kwargs "{'dry_run': 0}"
-        """
-        dry_run = _i(dry_run)
-
-        has_soi_sp = _has_column("Sales Order Item", "sales_partner")
-        has_mri_sp = _has_column("Material Request Item", "sales_partner")
-        has_poi_sp = _has_column("Purchase Order Item", "sales_partner")
-        has_pri_sp = _has_column("Purchase Receipt Item", "sales_partner")
-        has_pii_sp = _has_column("Purchase Invoice Item", "sales_partner")
-        has_mr_header_sp = _has_column("Material Request", "custom_sales_partner")
-
-        soi_partner = "NULLIF(soi.sales_partner, '')" if has_soi_sp else "NULL"
-        mri_partner = "NULLIF(mri.sales_partner, '')" if has_mri_sp else "NULL"
-        poi_partner = "NULLIF(poi.sales_partner, '')" if has_poi_sp else "NULL"
-        pri_partner = "NULLIF(pri.sales_partner, '')" if has_pri_sp else "NULL"
-        mr_header_partner = "NULLIF(mr.custom_sales_partner, '')" if has_mr_header_sp else "NULL"
-
-        result = {
-            "dry_run": bool(dry_run),
-            "sequence": ["Material Request", "Purchase Order", "Purchase Receipt", "Purchase Invoice"],
-            "counts": {
-                "material_request_items_needing_update": 0,
-                "material_request_items_updated": 0,
-                "material_request_headers_updated": 0,
-                "purchase_order_items_needing_update": 0,
-                "purchase_order_items_updated": 0,
-                "purchase_receipt_items_needing_update": 0,
-                "purchase_receipt_items_updated": 0,
-                "purchase_invoice_items_needing_update": 0,
-                "purchase_invoice_items_updated": 0,
-            },
-            "skipped": [],
-        }
-
-        # 1) Material Request Item from SO item/header
-        if not has_mri_sp:
-            result["skipped"].append("Material Request Item.sales_partner column not found")
-        else:
-            mr_source = f"COALESCE({soi_partner}, NULLIF(so.sales_partner, ''))"
-            mr_where = f"{mr_source} IS NOT NULL AND IFNULL(mri.sales_partner, '') != {mr_source}"
-
-            mr_count_sql = f"""
-                SELECT COUNT(*)
-                FROM `tabMaterial Request Item` mri
+        if not dry_run and mr_needs:
+            mr_update_sql = f"""
+                UPDATE `tabMaterial Request Item` mri
                 LEFT JOIN `tabSales Order Item` soi ON soi.name = mri.sales_order_item
                 LEFT JOIN `tabSales Order` so
                     ON so.name = COALESCE(NULLIF(mri.sales_order, ''), soi.parent)
+                SET mri.sales_partner = {mr_source}
                 WHERE mri.parenttype = 'Material Request'
                   AND {mr_where}
             """
-            mr_needs = _count_sql(mr_count_sql)
-            result["counts"]["material_request_items_needing_update"] = mr_needs
+            frappe.db.sql(mr_update_sql)
+            result["counts"]["material_request_items_updated"] = mr_needs
 
-            if not dry_run and mr_needs:
-                mr_update_sql = f"""
-                    UPDATE `tabMaterial Request Item` mri
-                    LEFT JOIN `tabSales Order Item` soi ON soi.name = mri.sales_order_item
-                    LEFT JOIN `tabSales Order` so
-                        ON so.name = COALESCE(NULLIF(mri.sales_order, ''), soi.parent)
-                    SET mri.sales_partner = {mr_source}
-                    WHERE mri.parenttype = 'Material Request'
-                      AND {mr_where}
-                """
-                frappe.db.sql(mr_update_sql)
-                result["counts"]["material_request_items_updated"] = mr_needs
-
-            if has_mr_header_sp:
-                mr_header_count_sql = """
-                    SELECT COUNT(*)
-                    FROM `tabMaterial Request` mr
+        if has_mr_header_sp:
+            mr_header_count_sql = """
+                SELECT COUNT(*)
+                FROM `tabMaterial Request` mr
+                INNER JOIN (
+                    SELECT parent, MIN(sales_partner) AS partner, COUNT(DISTINCT sales_partner) AS cnt
+                    FROM `tabMaterial Request Item`
+                    WHERE IFNULL(sales_partner, '') != ''
+                    GROUP BY parent
+                ) x ON x.parent = mr.name
+                WHERE x.cnt = 1
+                  AND IFNULL(mr.custom_sales_partner, '') != x.partner
+            """
+            mr_header_needs = _count_sql(mr_header_count_sql)
+            if not dry_run and mr_header_needs:
+                mr_header_update_sql = """
+                    UPDATE `tabMaterial Request` mr
                     INNER JOIN (
                         SELECT parent, MIN(sales_partner) AS partner, COUNT(DISTINCT sales_partner) AS cnt
                         FROM `tabMaterial Request Item`
                         WHERE IFNULL(sales_partner, '') != ''
                         GROUP BY parent
                     ) x ON x.parent = mr.name
+                    SET mr.custom_sales_partner = x.partner
                     WHERE x.cnt = 1
                       AND IFNULL(mr.custom_sales_partner, '') != x.partner
                 """
-                mr_header_needs = _count_sql(mr_header_count_sql)
-                if not dry_run and mr_header_needs:
-                    mr_header_update_sql = """
-                        UPDATE `tabMaterial Request` mr
-                        INNER JOIN (
-                            SELECT parent, MIN(sales_partner) AS partner, COUNT(DISTINCT sales_partner) AS cnt
-                            FROM `tabMaterial Request Item`
-                            WHERE IFNULL(sales_partner, '') != ''
-                            GROUP BY parent
-                        ) x ON x.parent = mr.name
-                        SET mr.custom_sales_partner = x.partner
-                        WHERE x.cnt = 1
-                          AND IFNULL(mr.custom_sales_partner, '') != x.partner
-                    """
-                    frappe.db.sql(mr_header_update_sql)
-                    result["counts"]["material_request_headers_updated"] = mr_header_needs
+                frappe.db.sql(mr_header_update_sql)
+                result["counts"]["material_request_headers_updated"] = mr_header_needs
 
-        # 2) Purchase Order Item from SO item/header, then MR item/header
-        if not has_poi_sp:
-            result["skipped"].append("Purchase Order Item.sales_partner column not found")
-        else:
-            po_source = f"COALESCE({soi_partner}, NULLIF(so.sales_partner, ''), {mri_partner}, {mr_header_partner})"
-            po_where = f"{po_source} IS NOT NULL AND IFNULL(poi.sales_partner, '') != {po_source}"
+    # 2) Purchase Order Item from SO item/header, then MR item/header
+    if not has_poi_sp:
+        result["skipped"].append("Purchase Order Item.sales_partner column not found")
+    else:
+        po_source = f"COALESCE({soi_partner}, NULLIF(so.sales_partner, ''), {mri_partner}, {mr_header_partner})"
+        po_where = f"{po_source} IS NOT NULL AND IFNULL(poi.sales_partner, '') != {po_source}"
 
-            po_count_sql = f"""
-                SELECT COUNT(*)
-                FROM `tabPurchase Order Item` poi
+        po_count_sql = f"""
+            SELECT COUNT(*)
+            FROM `tabPurchase Order Item` poi
+            LEFT JOIN `tabSales Order Item` soi ON soi.name = poi.sales_order_item
+            LEFT JOIN `tabSales Order` so
+                ON so.name = COALESCE(NULLIF(poi.sales_order, ''), soi.parent)
+            LEFT JOIN `tabMaterial Request Item` mri ON mri.name = poi.material_request_item
+            LEFT JOIN `tabMaterial Request` mr
+                ON mr.name = COALESCE(NULLIF(poi.material_request, ''), mri.parent)
+            WHERE poi.parenttype = 'Purchase Order'
+              AND {po_where}
+        """
+        po_needs = _count_sql(po_count_sql)
+        result["counts"]["purchase_order_items_needing_update"] = po_needs
+
+        if not dry_run and po_needs:
+            po_update_sql = f"""
+                UPDATE `tabPurchase Order Item` poi
                 LEFT JOIN `tabSales Order Item` soi ON soi.name = poi.sales_order_item
                 LEFT JOIN `tabSales Order` so
                     ON so.name = COALESCE(NULLIF(poi.sales_order, ''), soi.parent)
                 LEFT JOIN `tabMaterial Request Item` mri ON mri.name = poi.material_request_item
                 LEFT JOIN `tabMaterial Request` mr
                     ON mr.name = COALESCE(NULLIF(poi.material_request, ''), mri.parent)
+                SET poi.sales_partner = {po_source}
                 WHERE poi.parenttype = 'Purchase Order'
                   AND {po_where}
             """
-            po_needs = _count_sql(po_count_sql)
-            result["counts"]["purchase_order_items_needing_update"] = po_needs
+            frappe.db.sql(po_update_sql)
+            result["counts"]["purchase_order_items_updated"] = po_needs
 
-            if not dry_run and po_needs:
-                po_update_sql = f"""
-                    UPDATE `tabPurchase Order Item` poi
-                    LEFT JOIN `tabSales Order Item` soi ON soi.name = poi.sales_order_item
-                    LEFT JOIN `tabSales Order` so
-                        ON so.name = COALESCE(NULLIF(poi.sales_order, ''), soi.parent)
-                    LEFT JOIN `tabMaterial Request Item` mri ON mri.name = poi.material_request_item
-                    LEFT JOIN `tabMaterial Request` mr
-                        ON mr.name = COALESCE(NULLIF(poi.material_request, ''), mri.parent)
-                    SET poi.sales_partner = {po_source}
-                    WHERE poi.parenttype = 'Purchase Order'
-                      AND {po_where}
-                """
-                frappe.db.sql(po_update_sql)
-                result["counts"]["purchase_order_items_updated"] = po_needs
+    # 3) Purchase Receipt Item from PO item, then SO, then MR
+    if not has_pri_sp:
+        result["skipped"].append("Purchase Receipt Item.sales_partner column not found")
+    else:
+        pr_source = (
+            f"COALESCE({poi_partner}, {soi_partner}, NULLIF(so.sales_partner, ''), {mri_partner}, {mr_header_partner})"
+        )
+        pr_where = f"{pr_source} IS NOT NULL AND IFNULL(pri.sales_partner, '') != {pr_source}"
 
-        # 3) Purchase Receipt Item from PO item, then SO, then MR
-        if not has_pri_sp:
-            result["skipped"].append("Purchase Receipt Item.sales_partner column not found")
-        else:
-            pr_source = (
-                f"COALESCE({poi_partner}, {soi_partner}, NULLIF(so.sales_partner, ''), {mri_partner}, {mr_header_partner})"
-            )
-            pr_where = f"{pr_source} IS NOT NULL AND IFNULL(pri.sales_partner, '') != {pr_source}"
+        pr_count_sql = f"""
+            SELECT COUNT(*)
+            FROM `tabPurchase Receipt Item` pri
+            LEFT JOIN `tabPurchase Order Item` poi ON poi.name = pri.purchase_order_item
+            LEFT JOIN `tabSales Order Item` soi ON soi.name = COALESCE(NULLIF(pri.sales_order_item, ''), poi.sales_order_item)
+            LEFT JOIN `tabSales Order` so
+                ON so.name = COALESCE(NULLIF(pri.sales_order, ''), NULLIF(poi.sales_order, ''), soi.parent)
+            LEFT JOIN `tabMaterial Request Item` mri
+                ON mri.name = COALESCE(NULLIF(pri.material_request_item, ''), poi.material_request_item)
+            LEFT JOIN `tabMaterial Request` mr
+                ON mr.name = COALESCE(NULLIF(pri.material_request, ''), NULLIF(poi.material_request, ''), mri.parent)
+            WHERE pri.parenttype = 'Purchase Receipt'
+              AND {pr_where}
+        """
+        pr_needs = _count_sql(pr_count_sql)
+        result["counts"]["purchase_receipt_items_needing_update"] = pr_needs
 
-            pr_count_sql = f"""
-                SELECT COUNT(*)
-                FROM `tabPurchase Receipt Item` pri
+        if not dry_run and pr_needs:
+            pr_update_sql = f"""
+                UPDATE `tabPurchase Receipt Item` pri
                 LEFT JOIN `tabPurchase Order Item` poi ON poi.name = pri.purchase_order_item
                 LEFT JOIN `tabSales Order Item` soi ON soi.name = COALESCE(NULLIF(pri.sales_order_item, ''), poi.sales_order_item)
                 LEFT JOIN `tabSales Order` so
@@ -782,81 +799,64 @@ def backfill_sales_invoice_item_sales_partner(dry_run: int = 1):
                     ON mri.name = COALESCE(NULLIF(pri.material_request_item, ''), poi.material_request_item)
                 LEFT JOIN `tabMaterial Request` mr
                     ON mr.name = COALESCE(NULLIF(pri.material_request, ''), NULLIF(poi.material_request, ''), mri.parent)
+                SET pri.sales_partner = {pr_source}
                 WHERE pri.parenttype = 'Purchase Receipt'
                   AND {pr_where}
             """
-            pr_needs = _count_sql(pr_count_sql)
-            result["counts"]["purchase_receipt_items_needing_update"] = pr_needs
+            frappe.db.sql(pr_update_sql)
+            result["counts"]["purchase_receipt_items_updated"] = pr_needs
 
-            if not dry_run and pr_needs:
-                pr_update_sql = f"""
-                    UPDATE `tabPurchase Receipt Item` pri
-                    LEFT JOIN `tabPurchase Order Item` poi ON poi.name = pri.purchase_order_item
-                    LEFT JOIN `tabSales Order Item` soi ON soi.name = COALESCE(NULLIF(pri.sales_order_item, ''), poi.sales_order_item)
-                    LEFT JOIN `tabSales Order` so
-                        ON so.name = COALESCE(NULLIF(pri.sales_order, ''), NULLIF(poi.sales_order, ''), soi.parent)
-                    LEFT JOIN `tabMaterial Request Item` mri
-                        ON mri.name = COALESCE(NULLIF(pri.material_request_item, ''), poi.material_request_item)
-                    LEFT JOIN `tabMaterial Request` mr
-                        ON mr.name = COALESCE(NULLIF(pri.material_request, ''), NULLIF(poi.material_request, ''), mri.parent)
-                    SET pri.sales_partner = {pr_source}
-                    WHERE pri.parenttype = 'Purchase Receipt'
-                      AND {pr_where}
-                """
-                frappe.db.sql(pr_update_sql)
-                result["counts"]["purchase_receipt_items_updated"] = pr_needs
+    # 4) Purchase Invoice Item from PR item, then PO item, then SO, then MR
+    if not has_pii_sp:
+        result["skipped"].append("Purchase Invoice Item.sales_partner column not found")
+    else:
+        pi_source = (
+            f"COALESCE({pri_partner}, {poi_partner}, {soi_partner}, NULLIF(so.sales_partner, ''), {mri_partner}, {mr_header_partner})"
+        )
+        pi_where = f"{pi_source} IS NOT NULL AND IFNULL(pii.sales_partner, '') != {pi_source}"
 
-        # 4) Purchase Invoice Item from PR item, then PO item, then SO, then MR
-        if not has_pii_sp:
-            result["skipped"].append("Purchase Invoice Item.sales_partner column not found")
-        else:
-            pi_source = (
-                f"COALESCE({pri_partner}, {poi_partner}, {soi_partner}, NULLIF(so.sales_partner, ''), {mri_partner}, {mr_header_partner})"
-            )
-            pi_where = f"{pi_source} IS NOT NULL AND IFNULL(pii.sales_partner, '') != {pi_source}"
+        pi_count_sql = f"""
+            SELECT COUNT(*)
+            FROM `tabPurchase Invoice Item` pii
+            LEFT JOIN `tabPurchase Receipt Item` pri ON pri.name = pii.pr_detail
+            LEFT JOIN `tabPurchase Order Item` poi
+                ON poi.name = COALESCE(NULLIF(pii.po_detail, ''), pri.purchase_order_item)
+            LEFT JOIN `tabSales Order Item` soi
+                ON soi.name = COALESCE(pri.sales_order_item, poi.sales_order_item)
+            LEFT JOIN `tabSales Order` so
+                ON so.name = COALESCE(NULLIF(pri.sales_order, ''), NULLIF(poi.sales_order, ''), soi.parent)
+            LEFT JOIN `tabMaterial Request Item` mri
+                ON mri.name = COALESCE(pri.material_request_item, poi.material_request_item)
+            LEFT JOIN `tabMaterial Request` mr
+                ON mr.name = COALESCE(NULLIF(pri.material_request, ''), NULLIF(poi.material_request, ''), mri.parent)
+            WHERE pii.parenttype = 'Purchase Invoice'
+              AND {pi_where}
+        """
+        pi_needs = _count_sql(pi_count_sql)
+        result["counts"]["purchase_invoice_items_needing_update"] = pi_needs
 
-            pi_count_sql = f"""
-                SELECT COUNT(*)
-                FROM `tabPurchase Invoice Item` pii
+        if not dry_run and pi_needs:
+            pi_update_sql = f"""
+                UPDATE `tabPurchase Invoice Item` pii
                 LEFT JOIN `tabPurchase Receipt Item` pri ON pri.name = pii.pr_detail
                 LEFT JOIN `tabPurchase Order Item` poi
                     ON poi.name = COALESCE(NULLIF(pii.po_detail, ''), pri.purchase_order_item)
                 LEFT JOIN `tabSales Order Item` soi
-                    ON soi.name = COALESCE(NULLIF(pii.sales_order_item, ''), pri.sales_order_item, poi.sales_order_item)
+                    ON soi.name = COALESCE(pri.sales_order_item, poi.sales_order_item)
                 LEFT JOIN `tabSales Order` so
-                    ON so.name = COALESCE(NULLIF(pii.sales_order, ''), NULLIF(pri.sales_order, ''), NULLIF(poi.sales_order, ''), soi.parent)
+                    ON so.name = COALESCE(NULLIF(pri.sales_order, ''), NULLIF(poi.sales_order, ''), soi.parent)
                 LEFT JOIN `tabMaterial Request Item` mri
-                    ON mri.name = COALESCE(NULLIF(pii.material_request_item, ''), pri.material_request_item, poi.material_request_item)
+                    ON mri.name = COALESCE(pri.material_request_item, poi.material_request_item)
                 LEFT JOIN `tabMaterial Request` mr
-                    ON mr.name = COALESCE(NULLIF(pii.material_request, ''), NULLIF(pri.material_request, ''), NULLIF(poi.material_request, ''), mri.parent)
+                    ON mr.name = COALESCE(NULLIF(pri.material_request, ''), NULLIF(poi.material_request, ''), mri.parent)
+                SET pii.sales_partner = {pi_source}
                 WHERE pii.parenttype = 'Purchase Invoice'
                   AND {pi_where}
             """
-            pi_needs = _count_sql(pi_count_sql)
-            result["counts"]["purchase_invoice_items_needing_update"] = pi_needs
+            frappe.db.sql(pi_update_sql)
+            result["counts"]["purchase_invoice_items_updated"] = pi_needs
 
-            if not dry_run and pi_needs:
-                pi_update_sql = f"""
-                    UPDATE `tabPurchase Invoice Item` pii
-                    LEFT JOIN `tabPurchase Receipt Item` pri ON pri.name = pii.pr_detail
-                    LEFT JOIN `tabPurchase Order Item` poi
-                        ON poi.name = COALESCE(NULLIF(pii.po_detail, ''), pri.purchase_order_item)
-                    LEFT JOIN `tabSales Order Item` soi
-                        ON soi.name = COALESCE(NULLIF(pii.sales_order_item, ''), pri.sales_order_item, poi.sales_order_item)
-                    LEFT JOIN `tabSales Order` so
-                        ON so.name = COALESCE(NULLIF(pii.sales_order, ''), NULLIF(pri.sales_order, ''), NULLIF(poi.sales_order, ''), soi.parent)
-                    LEFT JOIN `tabMaterial Request Item` mri
-                        ON mri.name = COALESCE(NULLIF(pii.material_request_item, ''), pri.material_request_item, poi.material_request_item)
-                    LEFT JOIN `tabMaterial Request` mr
-                        ON mr.name = COALESCE(NULLIF(pii.material_request, ''), NULLIF(pri.material_request, ''), NULLIF(poi.material_request, ''), mri.parent)
-                    SET pii.sales_partner = {pi_source}
-                    WHERE pii.parenttype = 'Purchase Invoice'
-                      AND {pi_where}
-                """
-                frappe.db.sql(pi_update_sql)
-                result["counts"]["purchase_invoice_items_updated"] = pi_needs
+    if not dry_run:
+        frappe.db.commit()
 
-        if not dry_run:
-            frappe.db.commit()
-
-        return result
+    return result
