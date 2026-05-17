@@ -51,6 +51,10 @@ def get_data(filters):
 	invoice_items = _get_sales_invoice_items(filters)
 
 	for item in invoice_items:
+		_resolve_delivery_note_link(item)
+		if _is_zero_value_sales_order_bom_component(item):
+			continue
+
 		components = _get_components_for_invoice_item(item)
 		component_rows = []
 		is_bundle = bool(components)
@@ -128,10 +132,18 @@ def _get_sales_invoice_items(filters):
 	if filters.get("sales_invoice"):
 		conditions.append("si.name = %(sales_invoice)s")
 	if filters.get("delivery_note"):
-		conditions.append("sii.delivery_note = %(delivery_note)s")
+		conditions.append(f"({_get_delivery_note_filter_condition()})")
 
 	optional_fields = []
-	for fieldname in ("stock_qty", "incoming_rate", "valuation_rate", "buying_amount", "base_amount"):
+	for fieldname in (
+		"stock_qty",
+		"incoming_rate",
+		"valuation_rate",
+		"buying_amount",
+		"base_amount",
+		"sales_order",
+		"so_detail",
+	):
 		if _has_column("Sales Invoice Item", fieldname):
 			optional_fields.append(f"sii.{fieldname}")
 
@@ -168,10 +180,130 @@ def _get_components_for_invoice_item(item):
 	if item.delivery_note:
 		components = _get_delivery_note_components(item.delivery_note, item.dn_detail, item.item_code)
 
+	if not components and item.get("delivery_note") and item.get("sales_order"):
+		components = _get_delivery_note_custom_bom_components(item)
+
 	if not components:
 		components = _get_sales_invoice_components(item.sales_invoice, item.sales_invoice_item, item.item_code)
 
 	return components
+
+
+def _resolve_delivery_note_link(item):
+	if item.get("delivery_note"):
+		return
+
+	linked_dn = _find_delivery_note_for_invoice_item(item)
+	if linked_dn:
+		item.delivery_note = linked_dn.get("delivery_note")
+		item.dn_detail = linked_dn.get("dn_detail")
+
+
+def _find_delivery_note_for_invoice_item(item):
+	lookups = []
+
+	if item.get("sales_invoice"):
+		for fieldname in ("against_sales_invoice", "sales_invoice"):
+			if _has_column("Delivery Note Item", fieldname):
+				lookups.append((f"dni.{fieldname} = %(sales_invoice)s", {}))
+
+	if item.get("sales_order"):
+		for fieldname in ("against_sales_order", "sales_order"):
+			if _has_column("Delivery Note Item", fieldname):
+				extra_conditions = {}
+				if item.get("so_detail") and _has_column("Delivery Note Item", "so_detail"):
+					extra_conditions["so_detail"] = item.get("so_detail")
+				lookups.append((f"dni.{fieldname} = %(sales_order)s", extra_conditions))
+
+	for condition, extra_conditions in lookups:
+		conditions = [
+			"dn.docstatus = 1",
+			"dni.item_code = %(item_code)s",
+			condition,
+		]
+		params = {
+			"sales_invoice": item.get("sales_invoice"),
+			"sales_order": item.get("sales_order"),
+			"item_code": item.get("item_code"),
+		}
+
+		if extra_conditions.get("so_detail"):
+			conditions.append("dni.so_detail = %(so_detail)s")
+			params["so_detail"] = extra_conditions["so_detail"]
+
+		row = frappe.db.sql(
+			f"""
+			SELECT dni.parent AS delivery_note, dni.name AS dn_detail
+			FROM `tabDelivery Note Item` dni
+			INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+			WHERE {" AND ".join(conditions)}
+			ORDER BY dn.posting_date DESC, dn.name DESC, dni.idx
+			LIMIT 1
+			""",
+			params,
+			as_dict=True,
+		)
+		if row:
+			return row[0]
+
+	if item.get("sales_order"):
+		for fieldname in ("against_sales_order", "sales_order"):
+			if not _has_column("Delivery Note Item", fieldname):
+				continue
+
+			row = frappe.db.sql(
+				f"""
+				SELECT dni.parent AS delivery_note, dni.name AS dn_detail
+				FROM `tabDelivery Note Item` dni
+				INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+				WHERE dn.docstatus = 1
+					AND dni.{fieldname} = %(sales_order)s
+				ORDER BY dn.posting_date DESC, dn.name DESC, dni.idx
+				LIMIT 1
+				""",
+				{"sales_order": item.get("sales_order")},
+				as_dict=True,
+			)
+			if row:
+				return row[0]
+
+	return None
+
+
+def _get_delivery_note_filter_condition():
+	conditions = ["sii.delivery_note = %(delivery_note)s"]
+
+	for fieldname in ("against_sales_invoice", "sales_invoice"):
+		if _has_column("Delivery Note Item", fieldname):
+			conditions.append(
+				f"""
+				EXISTS (
+					SELECT 1
+					FROM `tabDelivery Note Item` dni_filter
+					WHERE dni_filter.parent = %(delivery_note)s
+						AND dni_filter.{fieldname} = si.name
+						AND dni_filter.item_code = sii.item_code
+				)
+				"""
+			)
+
+	if _has_column("Sales Invoice Item", "sales_order"):
+		for fieldname in ("against_sales_order", "sales_order"):
+			if _has_column("Delivery Note Item", fieldname):
+				conditions.append(
+					f"""
+					EXISTS (
+						SELECT 1
+						FROM `tabDelivery Note Item` dni_filter
+						WHERE dni_filter.parent = %(delivery_note)s
+							AND dni_filter.{fieldname} = sii.sales_order
+							AND IFNULL(sii.sales_order, '') != ''
+							AND dni_filter.item_code = sii.item_code
+					)
+					"""
+				)
+
+	return " OR ".join(conditions)
 
 
 def _get_delivery_note_components(delivery_note, dn_detail, parent_item):
@@ -200,6 +332,88 @@ def _get_sales_invoice_components(sales_invoice, sales_invoice_item, parent_item
 		conditions.append("parent_item = %(parent_item)s")
 
 	return _get_packed_items(conditions, params)
+
+
+def _get_delivery_note_custom_bom_components(item):
+	component_items = _get_sales_order_custom_bom_item_codes(item.get("sales_order"), item.get("item_code"))
+	if not component_items:
+		return []
+
+	fields = ["dni.name", "dni.parent", "'Delivery Note' AS parenttype", "dni.item_code", "dni.item_name", "dni.qty"]
+	for fieldname in ("warehouse", "incoming_rate", "rate", "valuation_rate"):
+		if _has_column("Delivery Note Item", fieldname):
+			fields.append(f"dni.{fieldname}")
+
+	return frappe.db.sql(
+		f"""
+		SELECT {", ".join(fields)}
+		FROM `tabDelivery Note Item` dni
+		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+		WHERE dn.docstatus = 1
+			AND dni.parent = %(delivery_note)s
+			AND dni.item_code IN %(component_items)s
+		ORDER BY dni.idx
+		""",
+		{
+			"delivery_note": item.get("delivery_note"),
+			"component_items": tuple(component_items),
+		},
+		as_dict=True,
+	)
+
+
+def _get_sales_order_custom_bom_item_codes(sales_order, parent_item):
+	if not sales_order or not parent_item:
+		return []
+
+	rows = frappe.db.sql(
+		"""
+		SELECT item
+		FROM `tabDelivery BOM`
+		WHERE parenttype = 'Sales Order'
+			AND parent = %(sales_order)s
+			AND custom_parent_product = %(parent_item)s
+			AND IFNULL(item, '') != ''
+		ORDER BY idx
+		""",
+		{"sales_order": sales_order, "parent_item": parent_item},
+		as_dict=True,
+	)
+
+	return [d.item for d in rows]
+
+
+def _is_zero_value_sales_order_bom_component(item):
+	if not item.get("sales_order") or flt(item.get("base_net_amount") or item.get("net_amount") or item.get("amount")):
+		return False
+
+	if not _has_column("Sales Invoice Item", "sales_order"):
+		return False
+
+	rows = frappe.db.sql(
+		"""
+		SELECT DISTINCT bom.custom_parent_product
+		FROM `tabDelivery BOM` bom
+		INNER JOIN `tabSales Invoice Item` parent_sii
+			ON parent_sii.parent = %(sales_invoice)s
+			AND parent_sii.item_code = bom.custom_parent_product
+			AND parent_sii.sales_order = %(sales_order)s
+		WHERE bom.parenttype = 'Sales Order'
+			AND bom.parent = %(sales_order)s
+			AND bom.item = %(item_code)s
+			AND IFNULL(bom.custom_parent_product, '') != ''
+			AND bom.custom_parent_product != %(item_code)s
+		LIMIT 1
+		""",
+		{
+			"sales_invoice": item.get("sales_invoice"),
+			"sales_order": item.get("sales_order"),
+			"item_code": item.get("item_code"),
+		},
+		as_dict=True,
+	)
+
+	return bool(rows)
 
 
 def _get_packed_items(conditions, params):
