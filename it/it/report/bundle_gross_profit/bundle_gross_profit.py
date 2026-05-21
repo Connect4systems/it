@@ -439,19 +439,16 @@ def _get_component_cost(component):
 	if not qty:
 		return 0, 0
 
-	avg_cost = _get_stock_ledger_average(component)
+	avg_cost = _get_first_rate(component, ("incoming_rate", "valuation_rate", "rate"))
 
 	if not avg_cost:
-		for fieldname in ("incoming_rate", "valuation_rate", "rate"):
-			if component.get(fieldname):
-				avg_cost = flt(component.get(fieldname))
-				break
+		avg_cost = _get_stock_ledger_average(component)
 
 	if not avg_cost:
-		avg_cost = flt(
+		avg_cost = abs(flt(
 			frappe.db.get_value("Item", component.get("item_code"), "valuation_rate")
 			or frappe.db.get_value("Item", component.get("item_code"), "last_purchase_rate")
-		)
+		))
 
 	return avg_cost, qty * avg_cost
 
@@ -467,18 +464,24 @@ def _get_invoice_item_cost(item):
 		return flt(item.get("buying_amount")) / qty, flt(item.get("buying_amount"))
 
 	if not avg_cost:
-		for fieldname in ("incoming_rate", "valuation_rate"):
-			if item.get(fieldname):
-				avg_cost = flt(item.get(fieldname))
-				break
+		avg_cost = _get_first_rate(item, ("incoming_rate", "valuation_rate"))
 
 	if not avg_cost:
-		avg_cost = flt(
+		avg_cost = abs(flt(
 			frappe.db.get_value("Item", item.get("item_code"), "valuation_rate")
 			or frappe.db.get_value("Item", item.get("item_code"), "last_purchase_rate")
-		)
+		))
 
 	return avg_cost, qty * avg_cost
+
+
+def _get_first_rate(row, fieldnames):
+	for fieldname in fieldnames:
+		rate = abs(flt(row.get(fieldname)))
+		if rate:
+			return rate
+
+	return 0
 
 
 def _get_invoice_item_stock_ledger_average(item):
@@ -552,6 +555,32 @@ def _get_stock_ledger_average(component):
 
 
 def _query_stock_ledger_average(conditions, params):
+	rate_field = None
+	for fieldname in ("valuation_rate", "incoming_rate"):
+		if _has_column("Stock Ledger Entry", fieldname):
+			rate_field = fieldname
+			break
+
+	if rate_field:
+		row = frappe.db.sql(
+			f"""
+			SELECT
+				SUM(ABS(actual_qty)) AS qty,
+				SUM(ABS(actual_qty) * ABS({rate_field})) AS amount
+			FROM `tabStock Ledger Entry`
+			WHERE {" AND ".join(conditions)}
+				AND IFNULL({rate_field}, 0) != 0
+			""",
+			params,
+			as_dict=True,
+		)
+
+		if row:
+			qty = flt(row[0].get("qty"))
+			amount = flt(row[0].get("amount"))
+			if qty:
+				return amount / qty
+
 	row = frappe.db.sql(
 		f"""
 		SELECT
