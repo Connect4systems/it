@@ -71,6 +71,96 @@ def _upsert_standard_product_bundle(parent_item_code: str, components: list[dict
     return pb.name
 
 
+def _standard_bundle_components_by_parent_from_opportunity(opp) -> dict[str, list[dict]]:
+    components_by_parent: dict[str, list[dict]] = {}
+
+    for r in (opp.get("custom_product_bundle") or []):
+        parent_item = r.get("custom_product") or r.get("custom_parent_product")
+        item_code = r.get("item_code")
+        qty = _f(r.get("qty"))
+
+        if not parent_item or not item_code or qty <= 0:
+            continue
+
+        components_by_parent.setdefault(parent_item, []).append(
+            {
+                "item_code": item_code,
+                "description": r.get("description") or "",
+                "qty": qty,
+                "uom": r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom"),
+            }
+        )
+
+    return components_by_parent
+
+
+def _ensure_standard_product_bundles_from_opportunity(opp) -> list[str]:
+    product_bundles: list[str] = []
+
+    for parent_item, components in _standard_bundle_components_by_parent_from_opportunity(opp).items():
+        product_bundle = _upsert_standard_product_bundle(parent_item, components)
+        if product_bundle:
+            product_bundles.append(product_bundle)
+
+    return product_bundles
+
+
+def _create_missing_standard_product_bundles_from_sales_order(so) -> list[str]:
+    """
+    If a Sales Order already has standard Bundle Items but the parent item's
+    Product Bundle record is missing, create it before Delivery Note mapping.
+    """
+    if not getattr(so, "packed_items", None):
+        return []
+
+    parent_qty_by_detail: dict[str, float] = {}
+    parent_qty_by_item: dict[str, float] = {}
+    for item in (so.get("items") or []):
+        item_code = item.get("item_code")
+        qty = _f(item.get("qty"))
+        if item.get("name"):
+            parent_qty_by_detail[item.get("name")] = qty
+        if item_code and item_code not in parent_qty_by_item:
+            parent_qty_by_item[item_code] = qty
+
+    components_by_parent: dict[str, list[dict]] = {}
+    for packed in (so.get("packed_items") or []):
+        parent_item = packed.get("parent_item")
+        item_code = packed.get("item_code")
+        qty = _f(packed.get("qty"))
+
+        if not parent_item or not item_code or qty <= 0:
+            continue
+
+        parent_qty = parent_qty_by_detail.get(packed.get("parent_detail_docname"))
+        if not parent_qty:
+            parent_qty = parent_qty_by_item.get(parent_item)
+
+        component_qty = qty / parent_qty if parent_qty else qty
+        if component_qty <= 0:
+            continue
+
+        components_by_parent.setdefault(parent_item, []).append(
+            {
+                "item_code": item_code,
+                "description": packed.get("description") or "",
+                "qty": component_qty,
+                "uom": packed.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom"),
+            }
+        )
+
+    product_bundles: list[str] = []
+    for parent_item, components in components_by_parent.items():
+        if frappe.db.exists("Product Bundle", {"new_item_code": parent_item}):
+            continue
+
+        product_bundle = _upsert_standard_product_bundle(parent_item, components)
+        if product_bundle:
+            product_bundles.append(product_bundle)
+
+    return product_bundles
+
+
 def _delivery_bom_rows_from_opportunity(opp) -> list[dict]:
     rows: list[dict] = []
     for r in (opp.get("custom_product_bundle") or []):
@@ -204,24 +294,21 @@ def _rebuild_packed_items_from_delivery_bom(doc, rows: list[dict]) -> None:
 @frappe.whitelist()
 def make_quotation_with_bundle(source_name: str, target_doc: dict | None = None):
     """
-    Call ERPNext core Opportunity->Quotation mapping, then ensure each MAIN
-    Opportunity Item has a standard Product Bundle built from
-    Opportunity.custom_product_bundle rows linked by custom_product.
+    Ensure each Opportunity parent item has a standard Product Bundle built
+    from Opportunity.custom_product_bundle rows, then let ERPNext create the
+    Quotation and standard Bundle Items/Packed Items.
     """
     from erpnext.crm.doctype.opportunity.opportunity import (
         make_quotation as core_make_quotation,
     )
 
-    qtn = core_make_quotation(source_name, target_doc)
-
     try:
         opp = frappe.get_doc("Opportunity", source_name)
     except frappe.DoesNotExistError:
-        return qtn
+        return core_make_quotation(source_name, target_doc)
 
-    delivery_rows = _delivery_bom_rows_from_opportunity(opp)
-    _set_custom_delivery_bom_rows(qtn, delivery_rows)
-    _rebuild_packed_items_from_delivery_bom(qtn, delivery_rows)
+    _ensure_standard_product_bundles_from_opportunity(opp)
+    qtn = core_make_quotation(source_name, target_doc)
 
     qtn.flags.ignore_permissions = True
     try:
@@ -269,20 +356,18 @@ def make_sales_order_with_bundle(source_name: str, target_doc: dict | None = Non
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def make_delivery_note_merged(source_name: str, target_doc: dict | None = None):
-    """Sales Order -> Delivery Note with packed items rebuilt from custom_delivery_bom."""
+    """Sales Order -> Delivery Note with missing standard Product Bundles created first."""
     from erpnext.selling.doctype.sales_order.sales_order import (
         make_delivery_note as core_make_delivery_note,
     )
 
-    dn = core_make_delivery_note(source_name, target_doc)
-
     try:
         so = frappe.get_doc("Sales Order", source_name)
     except frappe.DoesNotExistError:
-        return dn
+        return core_make_delivery_note(source_name, target_doc)
 
-    rows = _delivery_bom_rows_from_doc(so)
-    _rebuild_packed_items_from_delivery_bom(dn, rows)
+    _create_missing_standard_product_bundles_from_sales_order(so)
+    dn = core_make_delivery_note(source_name, target_doc)
 
     dn.flags.ignore_permissions = True
     try:
