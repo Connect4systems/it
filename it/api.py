@@ -118,6 +118,86 @@ def _delivery_bom_rows_from_doc(doc) -> list[dict]:
     return rows
 
 
+def _set_custom_delivery_bom_rows(doc, rows: list[dict]) -> None:
+    if not hasattr(doc, "custom_delivery_bom"):
+        return
+
+    bom_meta = frappe.get_meta("Delivery BOM")
+    has_parent_product = _has(bom_meta, "custom_parent_product")
+
+    doc.set("custom_delivery_bom", [])
+    for r in (rows or []):
+        item_code = r.get("item")
+        if not item_code:
+            continue
+
+        row = doc.append("custom_delivery_bom", {})
+        row.item = item_code
+        row.item_name = r.get("item_name") or _item_name(item_code)
+        row.description = r.get("description") or ""
+        row.qty = _f(r.get("qty"))
+        if _has(bom_meta, "uom"):
+            row.uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        if _has(bom_meta, "conversion_factor"):
+            row.conversion_factor = _f(r.get("conversion_factor") or 1)
+        if has_parent_product:
+            row.custom_parent_product = r.get("custom_parent_product")
+
+
+def _rebuild_packed_items_from_delivery_bom(doc, rows: list[dict]) -> None:
+    if not hasattr(doc, "packed_items"):
+        return
+
+    packed_meta = frappe.get_meta("Packed Item")
+    item_rows = list(doc.get("items") or [])
+
+    # Map parent item code -> first matching transaction item row.
+    parent_row_by_code: dict[str, object] = {}
+    for it in item_rows:
+        code = it.get("item_code")
+        if code and code not in parent_row_by_code:
+            parent_row_by_code[code] = it
+
+    doc.set("packed_items", [])
+    for r in (rows or []):
+        item_code = r.get("item")
+        qty = _f(r.get("qty"))
+        if not item_code or qty <= 0:
+            continue
+
+        parent_code = r.get("custom_parent_product")
+        parent_row = parent_row_by_code.get(parent_code) if parent_code else None
+        if not parent_row and item_rows:
+            parent_row = item_rows[0]
+            parent_code = parent_code or parent_row.get("item_code")
+
+        pr = doc.append("packed_items", {})
+
+        if _has(packed_meta, "parent_item"):
+            pr.parent_item = parent_code
+        if _has(packed_meta, "parent_detail_docname") and parent_row:
+            pr.parent_detail_docname = parent_row.get("name")
+
+        pr.item_code = item_code
+        if _has(packed_meta, "item_name"):
+            pr.item_name = r.get("item_name") or _item_name(item_code)
+        if _has(packed_meta, "description"):
+            pr.description = r.get("description") or ""
+
+        if _has(packed_meta, "uom"):
+            pr.uom = r.get("uom") or frappe.db.get_value("Item", item_code, "stock_uom")
+        if _has(packed_meta, "stock_uom"):
+            pr.stock_uom = frappe.db.get_value("Item", item_code, "stock_uom")
+        if _has(packed_meta, "conversion_factor"):
+            pr.conversion_factor = _f(r.get("conversion_factor") or 1)
+
+        if _has(packed_meta, "qty"):
+            pr.qty = qty
+
+        if _has(packed_meta, "warehouse") and parent_row and parent_row.get("warehouse"):
+            pr.warehouse = parent_row.get("warehouse")
+
+
 # ----------------------------------------------------------------------
 # 1) Opportunity -> Quotation   (prepare standard Product Bundle for MAIN items)
 # ----------------------------------------------------------------------
@@ -139,34 +219,12 @@ def make_quotation_with_bundle(source_name: str, target_doc: dict | None = None)
     except frappe.DoesNotExistError:
         return qtn
 
-    components_by_parent: dict[str, list[dict]] = {}
-    for r in (opp.get("custom_product_bundle") or []):
-        parent = r.get("custom_product") or r.get("custom_parent_product")
-        item_code = r.get("item_code")
-        qty = _f(r.get("qty"))  # per-one qty for standard Product Bundle master
-        if not parent or not item_code or qty <= 0:
-            continue
-
-        components_by_parent.setdefault(parent, []).append(
-            {
-                "item_code": item_code,
-                "qty": qty,
-                "description": r.get("description") or "",
-                "uom": r.get("uom"),
-            }
-        )
-
-    for it in (opp.get("items") or []):
-        parent_item = it.get("item_code")
-        if not parent_item or not _i(it.get("custom_main")):
-            continue
-        _upsert_standard_product_bundle(parent_item, components_by_parent.get(parent_item, []))
+    delivery_rows = _delivery_bom_rows_from_opportunity(opp)
+    _set_custom_delivery_bom_rows(qtn, delivery_rows)
+    _rebuild_packed_items_from_delivery_bom(qtn, delivery_rows)
 
     qtn.flags.ignore_permissions = True
     try:
-        # Make sure standard packed items can be rebuilt from Product Bundle.
-        if hasattr(qtn, "set_packed_items"):
-            qtn.set_packed_items()
         qtn.run_method("set_missing_values")
         qtn.run_method("calculate_taxes_and_totals")
     except Exception:
@@ -180,11 +238,30 @@ def make_quotation_with_bundle(source_name: str, target_doc: dict | None = None)
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def make_sales_order_with_bundle(source_name: str, target_doc: dict | None = None):
-    """Use ERPNext standard Quotation -> Sales Order mapping."""
+    """Quotation -> Sales Order with custom_delivery_bom and packed items preserved."""
     from erpnext.selling.doctype.quotation.quotation import (
         make_sales_order as core_make_sales_order,
     )
-    return core_make_sales_order(source_name, target_doc)
+
+    so = core_make_sales_order(source_name, target_doc)
+
+    try:
+        qtn = frappe.get_doc("Quotation", source_name)
+    except frappe.DoesNotExistError:
+        return so
+
+    rows = _delivery_bom_rows_from_doc(qtn)
+    _set_custom_delivery_bom_rows(so, rows)
+    _rebuild_packed_items_from_delivery_bom(so, rows)
+
+    so.flags.ignore_permissions = True
+    try:
+        so.run_method("set_missing_values")
+        so.run_method("calculate_taxes_and_totals")
+    except Exception:
+        pass
+
+    return so
 
 
 # ----------------------------------------------------------------------
@@ -192,11 +269,29 @@ def make_sales_order_with_bundle(source_name: str, target_doc: dict | None = Non
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def make_delivery_note_merged(source_name: str, target_doc: dict | None = None):
-    """Use ERPNext standard Sales Order -> Delivery Note mapping."""
+    """Sales Order -> Delivery Note with packed items rebuilt from custom_delivery_bom."""
     from erpnext.selling.doctype.sales_order.sales_order import (
         make_delivery_note as core_make_delivery_note,
     )
-    return core_make_delivery_note(source_name, target_doc)
+
+    dn = core_make_delivery_note(source_name, target_doc)
+
+    try:
+        so = frappe.get_doc("Sales Order", source_name)
+    except frappe.DoesNotExistError:
+        return dn
+
+    rows = _delivery_bom_rows_from_doc(so)
+    _rebuild_packed_items_from_delivery_bom(dn, rows)
+
+    dn.flags.ignore_permissions = True
+    try:
+        dn.run_method("set_missing_values")
+        dn.run_method("calculate_taxes_and_totals")
+    except Exception:
+        pass
+
+    return dn
 
 
 # ----------------------------------------------------------------------
@@ -553,6 +648,37 @@ def get_items_from_sales_order_merged(sales_order: str, *args, **kwargs):
         return container
 
     return items_list
+
+
+def sync_custom_delivery_bom_to_packed_items(doc, method=None):
+    """Keep packed items aligned with custom_delivery_bom for selling documents."""
+    rows = _delivery_bom_rows_from_doc(doc)
+    if not rows:
+        return
+    _rebuild_packed_items_from_delivery_bom(doc, rows)
+
+
+def sync_delivery_note_packed_items_from_sales_order(doc, method=None):
+    """Ensure DN packed items are sourced from SO.custom_delivery_bom, not global Product Bundle."""
+    sales_order_name = None
+    for it in (doc.get("items") or []):
+        sales_order_name = it.get("against_sales_order") or it.get("sales_order")
+        if sales_order_name:
+            break
+
+    if not sales_order_name:
+        return
+
+    try:
+        so = frappe.get_doc("Sales Order", sales_order_name)
+    except frappe.DoesNotExistError:
+        return
+
+    rows = _delivery_bom_rows_from_doc(so)
+    if not rows:
+        return
+
+    _rebuild_packed_items_from_delivery_bom(doc, rows)
 
 
 # ----------------------------------------------------------------------

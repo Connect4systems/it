@@ -13,6 +13,7 @@ function fill_so_delivery_bom(frm, rows) {
     d.qty         = r.qty || 0;
     if ("uom" in d) d.uom = r.uom || null;
     if ("conversion_factor" in d) d.conversion_factor = r.conversion_factor || 1;
+    if ("custom_parent_product" in d) d.custom_parent_product = r.custom_parent_product || null;
   });
   frm.refresh_field("custom_delivery_bom");
 }
