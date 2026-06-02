@@ -1,0 +1,59 @@
+{
+ "charts": [],
+ "content": "[{\"id\":\"cmmzNY6hSN\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\">CEO</span>\",\"col\":12}},{\"id\":\"nvpiNG853n\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Customer Outstanding\",\"col\":3}},{\"id\":\"NvzedyJkbW\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Sum of Outstanding\",\"col\":3}},{\"id\":\"iHR8Y70tWP\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Maximum of Bank_balance\",\"col\":3}},{\"id\":\"_Q-HqsGouy\",\"type\":\"number_card\",\"data\":{\"number_card_name\":\"Maximum of Cash_balance\",\"col\":3}},{\"id\":\"Bes6TgYvZT\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"z2FXA_nP7w\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"YT Gross Profit\",\"col\":3}}]",
+ "creation": "2026-06-02 21:24:06.624224",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "solid-success",
+ "idx": 0,
+ "indicator_color": "green",
+ "is_hidden": 0,
+ "label": "CEO",
+ "links": [],
+ "modified": "2026-06-02 21:28:08.823709",
+ "modified_by": "Administrator",
+ "module": "It",
+ "name": "CEO",
+ "number_cards": [
+  {
+   "label": "Customer Outstanding",
+   "number_card_name": "Customer Outstanding"
+  },
+  {
+   "label": "Maximum of Cash_balance",
+   "number_card_name": "Maximum of Cash_balance"
+  },
+  {
+   "label": "Sum of Outstanding",
+   "number_card_name": "Sum of Outstanding"
+  },
+  {
+   "label": "Maximum of Bank_balance",
+   "number_card_name": "Maximum of Bank_balance"
+  }
+ ],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "CEO"
+  }
+ ],
+ "sequence_id": 1.0,
+ "shortcuts": [
+  {
+   "color": "Grey",
+   "doc_view": "List",
+   "label": "YT Gross Profit",
+   "link_to": "Bundle Gross Profit",
+   "report_ref_doctype": "Sales Invoice",
+   "type": "Report"
+  }
+ ],
+ "title": "CEO"
+}
