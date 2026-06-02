@@ -105,10 +105,10 @@ def _ensure_standard_product_bundles_from_opportunity(opp) -> list[str]:
     return product_bundles
 
 
-def _create_missing_standard_product_bundles_from_sales_order(so) -> list[str]:
+def _sync_standard_product_bundles_from_sales_order(so) -> list[str]:
     """
-    If a Sales Order already has standard Bundle Items but the parent item's
-    Product Bundle record is missing, create it before Delivery Note mapping.
+    Use the Sales Order's selected standard Bundle Items as the source of truth
+    before Delivery Note mapping, so DN uses the same components from the SO.
     """
     if not getattr(so, "packed_items", None):
         return []
@@ -151,9 +151,6 @@ def _create_missing_standard_product_bundles_from_sales_order(so) -> list[str]:
 
     product_bundles: list[str] = []
     for parent_item, components in components_by_parent.items():
-        if frappe.db.exists("Product Bundle", {"new_item_code": parent_item}):
-            continue
-
         product_bundle = _upsert_standard_product_bundle(parent_item, components)
         if product_bundle:
             product_bundles.append(product_bundle)
@@ -356,7 +353,7 @@ def make_sales_order_with_bundle(source_name: str, target_doc: dict | None = Non
 # ----------------------------------------------------------------------
 @frappe.whitelist()
 def make_delivery_note_merged(source_name: str, target_doc: dict | None = None):
-    """Sales Order -> Delivery Note with missing standard Product Bundles created first."""
+    """Sales Order -> Delivery Note with standard Product Bundles synced from SO first."""
     from erpnext.selling.doctype.sales_order.sales_order import (
         make_delivery_note as core_make_delivery_note,
     )
@@ -366,7 +363,7 @@ def make_delivery_note_merged(source_name: str, target_doc: dict | None = None):
     except frappe.DoesNotExistError:
         return core_make_delivery_note(source_name, target_doc)
 
-    _create_missing_standard_product_bundles_from_sales_order(so)
+    _sync_standard_product_bundles_from_sales_order(so)
     dn = core_make_delivery_note(source_name, target_doc)
 
     dn.flags.ignore_permissions = True
