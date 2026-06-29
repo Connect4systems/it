@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
-from frappe.utils import flt
+from frappe.utils import flt, get_datetime
 
 
 def execute(filters=None):
@@ -30,25 +30,68 @@ def _validate_filters(filters):
 def get_columns():
 	return [
 		{"label": _("Row"), "fieldname": "row_label", "fieldtype": "Data", "width": 260},
-		{"label": _("Sales Invoice"), "fieldname": "sales_invoice", "fieldtype": "Link", "options": "Sales Invoice", "width": 150},
-		{"label": _("Delivery Note"), "fieldname": "delivery_note", "fieldtype": "Link", "options": "Delivery Note", "width": 150},
+		{
+			"label": _("Sales Invoice"),
+			"fieldname": "sales_invoice",
+			"fieldtype": "Link",
+			"options": "Sales Invoice",
+			"width": 150,
+		},
+		{
+			"label": _("Delivery Note"),
+			"fieldname": "delivery_note",
+			"fieldtype": "Link",
+			"options": "Delivery Note",
+			"width": 150,
+		},
 		{"label": _("Posting Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 110},
-		{"label": _("Customer"), "fieldname": "customer", "fieldtype": "Link", "options": "Customer", "width": 180},
-		{"label": _("Sales Partner"), "fieldname": "sales_partner", "fieldtype": "Link", "options": "Sales Partner", "width": 150},
-		{"label": _("Parent Item"), "fieldname": "parent_item", "fieldtype": "Link", "options": "Item", "width": 160},
-		{"label": _("Component Item"), "fieldname": "component_item", "fieldtype": "Link", "options": "Item", "width": 160},
+		{
+			"label": _("Customer"),
+			"fieldname": "customer",
+			"fieldtype": "Link",
+			"options": "Customer",
+			"width": 180,
+		},
+		{
+			"label": _("Sales Partner"),
+			"fieldname": "sales_partner",
+			"fieldtype": "Link",
+			"options": "Sales Partner",
+			"width": 150,
+		},
+		{
+			"label": _("Parent Item"),
+			"fieldname": "parent_item",
+			"fieldtype": "Link",
+			"options": "Item",
+			"width": 160,
+		},
+		{
+			"label": _("Component Item"),
+			"fieldname": "component_item",
+			"fieldtype": "Link",
+			"options": "Item",
+			"width": 160,
+		},
 		{"label": _("Qty"), "fieldname": "qty", "fieldtype": "Float", "width": 90},
 		{"label": _("Average Cost"), "fieldname": "average_cost", "fieldtype": "Currency", "width": 120},
+		{"label": _("Cost Basis"), "fieldname": "cost_basis", "fieldtype": "Data", "width": 240},
 		{"label": _("Cost Amount"), "fieldname": "cost_amount", "fieldtype": "Currency", "width": 130},
 		{"label": _("Sales Amount"), "fieldname": "sales_amount", "fieldtype": "Currency", "width": 130},
 		{"label": _("Gross Profit"), "fieldname": "gross_profit", "fieldtype": "Currency", "width": 130},
-		{"label": _("Gross Profit %"), "fieldname": "gross_profit_percent", "fieldtype": "Percent", "width": 120},
+		{
+			"label": _("Gross Profit %"),
+			"fieldname": "gross_profit_percent",
+			"fieldtype": "Percent",
+			"width": 120,
+		},
 	]
 
 
 def get_data(filters):
 	rows = []
 	invoice_items = _get_sales_invoice_items(filters)
+	cost_context = {"has_serial_no": {}, "outgoing_cutoffs": {}, "serial_rates": {}}
 
 	for item in invoice_items:
 		_resolve_delivery_note_link(item)
@@ -62,8 +105,8 @@ def get_data(filters):
 		if is_bundle:
 			total_cost = 0
 			for component in components:
-				qty = abs(flt(component.get("qty")))
-				avg_cost, cost_amount = _get_component_cost(component)
+				qty = abs(flt(component.get("stock_qty") or component.get("qty")))
+				avg_cost, cost_amount, cost_basis = _get_component_cost(component, cost_context)
 				total_cost += cost_amount
 
 				component_rows.append(
@@ -79,6 +122,7 @@ def get_data(filters):
 						"component_item": component.get("item_code"),
 						"qty": qty,
 						"average_cost": avg_cost,
+						"cost_basis": cost_basis,
 						"cost_amount": cost_amount,
 						"sales_amount": 0,
 						"gross_profit": None,
@@ -86,7 +130,7 @@ def get_data(filters):
 					}
 				)
 		else:
-			average_cost, total_cost = _get_invoice_item_cost(item)
+			average_cost, total_cost, cost_basis = _get_invoice_item_cost(item, cost_context)
 
 		sales_amount = flt(item.base_net_amount or item.net_amount or item.amount)
 		gross_profit = sales_amount - total_cost
@@ -103,8 +147,9 @@ def get_data(filters):
 				"sales_partner": item.sales_partner,
 				"parent_item": item.item_code,
 				"component_item": None,
-				"qty": flt(item.qty),
+				"qty": flt(item.get("stock_qty") or item.get("qty")),
 				"average_cost": None if is_bundle else average_cost,
+				"cost_basis": _("Sum of component costs") if is_bundle else cost_basis,
 				"cost_amount": total_cost,
 				"sales_amount": sales_amount,
 				"gross_profit": gross_profit,
@@ -137,12 +182,13 @@ def _get_sales_invoice_items(filters):
 	optional_fields = []
 	for fieldname in (
 		"stock_qty",
-		"incoming_rate",
-		"valuation_rate",
-		"buying_amount",
 		"base_amount",
 		"sales_order",
 		"so_detail",
+		"warehouse",
+		"serial_no",
+		"serial_and_batch_bundle",
+		"batch_no",
 	):
 		if _has_column("Sales Invoice Item", fieldname):
 			optional_fields.append(f"sii.{fieldname}")
@@ -184,7 +230,9 @@ def _get_components_for_invoice_item(item):
 		components = _get_delivery_note_custom_bom_components(item)
 
 	if not components:
-		components = _get_sales_invoice_components(item.sales_invoice, item.sales_invoice_item, item.item_code)
+		components = _get_sales_invoice_components(
+			item.sales_invoice, item.sales_invoice_item, item.item_code
+		)
 
 	return components
 
@@ -339,8 +387,24 @@ def _get_delivery_note_custom_bom_components(item):
 	if not component_items:
 		return []
 
-	fields = ["dni.name", "dni.parent", "'Delivery Note' AS parenttype", "dni.item_code", "dni.item_name", "dni.qty"]
-	for fieldname in ("warehouse", "incoming_rate", "rate", "valuation_rate"):
+	fields = [
+		"dni.name",
+		"dni.parent",
+		"'Delivery Note' AS parenttype",
+		"dni.item_code",
+		"dni.item_name",
+		"dni.qty",
+	]
+	for fieldname in (
+		"warehouse",
+		"incoming_rate",
+		"rate",
+		"valuation_rate",
+		"stock_qty",
+		"serial_no",
+		"serial_and_batch_bundle",
+		"batch_no",
+	):
 		if _has_column("Delivery Note Item", fieldname):
 			fields.append(f"dni.{fieldname}")
 
@@ -384,7 +448,9 @@ def _get_sales_order_custom_bom_item_codes(sales_order, parent_item):
 
 
 def _is_zero_value_sales_order_bom_component(item):
-	if not item.get("sales_order") or flt(item.get("base_net_amount") or item.get("net_amount") or item.get("amount")):
+	if not item.get("sales_order") or flt(
+		item.get("base_net_amount") or item.get("net_amount") or item.get("amount")
+	):
 		return False
 
 	if not _has_column("Sales Invoice Item", "sales_order"):
@@ -418,7 +484,18 @@ def _is_zero_value_sales_order_bom_component(item):
 
 def _get_packed_items(conditions, params):
 	fields = ["name", "parent", "parenttype", "item_code", "item_name", "qty"]
-	for fieldname in ("warehouse", "incoming_rate", "rate", "valuation_rate", "parent_item", "parent_detail_docname"):
+	for fieldname in (
+		"warehouse",
+		"incoming_rate",
+		"rate",
+		"valuation_rate",
+		"stock_qty",
+		"serial_no",
+		"serial_and_batch_bundle",
+		"batch_no",
+		"parent_item",
+		"parent_detail_docname",
+	):
 		if _has_column("Packed Item", fieldname):
 			fields.append(fieldname)
 
@@ -434,171 +511,471 @@ def _get_packed_items(conditions, params):
 	)
 
 
-def _get_component_cost(component):
-	qty = abs(flt(component.get("qty")))
-	if not qty:
-		return 0, 0
-
-	avg_cost = _get_first_rate(component, ("incoming_rate", "valuation_rate", "rate"))
-
-	if not avg_cost:
-		avg_cost = _get_stock_ledger_average(component)
-
-	if not avg_cost:
-		avg_cost = abs(flt(
-			frappe.db.get_value("Item", component.get("item_code"), "valuation_rate")
-			or frappe.db.get_value("Item", component.get("item_code"), "last_purchase_rate")
-		))
-
-	return avg_cost, qty * avg_cost
+def _get_component_cost(component, cost_context):
+	qty = abs(flt(component.get("stock_qty") or component.get("qty")))
+	return _get_item_cost(component, qty, cost_context)
 
 
-def _get_invoice_item_cost(item):
+def _get_invoice_item_cost(item, cost_context):
 	qty = abs(flt(item.get("stock_qty") or item.get("qty")))
+	return _get_item_cost(item, qty, cost_context)
+
+
+def _get_item_cost(row, qty, cost_context):
 	if not qty:
-		return 0, 0
+		return 0, 0, _("Zero quantity")
 
-	avg_cost = _get_invoice_item_stock_ledger_average(item)
+	if _item_has_serial_no(row.get("item_code"), cost_context):
+		return _get_serialized_item_cost(row, qty, cost_context)
 
-	if not avg_cost and flt(item.get("buying_amount")):
-		return flt(item.get("buying_amount")) / qty, flt(item.get("buying_amount"))
+	average_cost = _get_fifo_stock_ledger_average(row)
+	if average_cost is None:
+		return 0, 0, _("FIFO cost unavailable")
 
-	if not avg_cost:
-		avg_cost = _get_first_rate(item, ("incoming_rate", "valuation_rate"))
-
-	if not avg_cost:
-		avg_cost = abs(flt(
-			frappe.db.get_value("Item", item.get("item_code"), "valuation_rate")
-			or frappe.db.get_value("Item", item.get("item_code"), "last_purchase_rate")
-		))
-
-	return avg_cost, qty * avg_cost
+	return average_cost, qty * average_cost, _("FIFO (Stock Ledger)")
 
 
-def _get_first_rate(row, fieldnames):
-	for fieldname in fieldnames:
-		rate = abs(flt(row.get(fieldname)))
-		if rate:
-			return rate
+def _item_has_serial_no(item_code, cost_context):
+	if not item_code:
+		return False
 
-	return 0
+	cache = cost_context["has_serial_no"]
+	if item_code not in cache:
+		cache[item_code] = bool(frappe.get_cached_value("Item", item_code, "has_serial_no"))
+
+	return cache[item_code]
 
 
-def _get_invoice_item_stock_ledger_average(item):
-	if item.get("delivery_note"):
-		conditions = [
-			"voucher_type = 'Delivery Note'",
-			"voucher_no = %(delivery_note)s",
-			"item_code = %(item_code)s",
-			"actual_qty < 0",
-		]
-		params = {
-			"delivery_note": item.get("delivery_note"),
-			"dn_detail": item.get("dn_detail"),
-			"item_code": item.get("item_code"),
-		}
+def _get_serialized_item_cost(row, qty, cost_context):
+	serial_numbers = _get_outgoing_serial_numbers(row)
+	if not serial_numbers:
+		return 0, 0, _("Missing serial numbers / Purchase Receipt cost")
 
-		if _has_column("Stock Ledger Entry", "voucher_detail_no") and item.get("dn_detail"):
-			detail_cost = _query_stock_ledger_average(conditions + ["voucher_detail_no = %(dn_detail)s"], params)
-			if detail_cost:
-				return detail_cost
+	outgoing_cutoff = _get_outgoing_cutoff(row, cost_context)
+	total_cost = 0
+	missing_serials = []
+	purchase_receipts = set()
 
-		cost = _query_stock_ledger_average(conditions, params)
-		if cost:
-			return cost
+	for serial_no in serial_numbers:
+		cache_key = (row.get("item_code"), serial_no, str(outgoing_cutoff or ""))
+		if cache_key not in cost_context["serial_rates"]:
+			cost_context["serial_rates"][cache_key] = _get_purchase_receipt_serial_rate(
+				row.get("item_code"), serial_no, outgoing_cutoff
+			)
+
+		serial_rate = cost_context["serial_rates"][cache_key]
+		if not serial_rate:
+			missing_serials.append(serial_no)
+			continue
+
+		rate, purchase_receipt = serial_rate
+		if rate is None:
+			missing_serials.append(serial_no)
+			continue
+
+		total_cost += abs(flt(rate))
+		if purchase_receipt:
+			purchase_receipts.add(purchase_receipt)
+
+	average_cost = total_cost / qty
+	basis_parts = [_("Serial Purchase Receipt")]
+
+	if purchase_receipts:
+		basis_parts.append(", ".join(sorted(purchase_receipts)))
+	if flt(len(serial_numbers)) != flt(qty):
+		basis_parts.append(_("serial quantity {0}, stock quantity {1}").format(len(serial_numbers), qty))
+	if missing_serials:
+		basis_parts.append(_("missing: {0}").format(", ".join(missing_serials)))
+
+	return average_cost, total_cost, "; ".join(basis_parts)
+
+
+def _get_outgoing_serial_numbers(row):
+	serial_numbers = []
+
+	if row.get("serial_and_batch_bundle"):
+		serial_numbers.extend(_get_bundle_serial_numbers(row.get("serial_and_batch_bundle")))
+
+	serial_numbers.extend(_split_serial_numbers(row.get("serial_no")))
+
+	if not serial_numbers:
+		for ledger_row in _get_outgoing_stock_ledger_rows(row, ("serial_no", "serial_and_batch_bundle")):
+			if ledger_row.get("serial_and_batch_bundle"):
+				serial_numbers.extend(_get_bundle_serial_numbers(ledger_row.get("serial_and_batch_bundle")))
+			serial_numbers.extend(_split_serial_numbers(ledger_row.get("serial_no")))
+
+	return list(dict.fromkeys(serial_numbers))
+
+
+def _get_bundle_serial_numbers(bundle):
+	if not bundle or not _has_column("Serial and Batch Entry", "serial_no"):
+		return []
+
+	return [
+		serial_no
+		for serial_no in frappe.get_all(
+			"Serial and Batch Entry",
+			filters={"parent": bundle},
+			order_by="idx",
+			pluck="serial_no",
+		)
+		if serial_no
+	]
+
+
+def _split_serial_numbers(value):
+	if not value:
+		return []
+
+	normalized = str(value).replace("\r", "\n").replace(",", "\n")
+	return [serial_no.strip() for serial_no in normalized.split("\n") if serial_no.strip()]
+
+
+def _get_purchase_receipt_serial_rate(item_code, serial_no, outgoing_cutoff=None):
+	rate = _get_serial_bundle_purchase_receipt_rate(item_code, serial_no, outgoing_cutoff)
+	if rate:
+		return rate
+
+	rate = _get_legacy_serial_purchase_receipt_rate(item_code, serial_no, outgoing_cutoff)
+	if rate:
+		return rate
+
+	return _get_serial_master_purchase_receipt_rate(item_code, serial_no, outgoing_cutoff)
+
+
+def _get_serial_bundle_purchase_receipt_rate(item_code, serial_no, outgoing_cutoff=None):
+	required_columns = (
+		_has_column("Serial and Batch Entry", "serial_no"),
+		_has_column("Serial and Batch Bundle", "voucher_type"),
+		_has_column("Serial and Batch Bundle", "voucher_no"),
+	)
+	if not all(required_columns):
+		return None
+
+	incoming_rate_field = (
+		"sbe.incoming_rate" if _has_column("Serial and Batch Entry", "incoming_rate") else "0"
+	)
+	detail_field = (
+		"bundle.voucher_detail_no" if _has_column("Serial and Batch Bundle", "voucher_detail_no") else "NULL"
+	)
+	conditions = [
+		"bundle.voucher_type = 'Purchase Receipt'",
+		"bundle.voucher_no = pr.name",
+		"bundle.docstatus = 1",
+		"pr.docstatus = 1",
+		"bundle.item_code = %(item_code)s",
+		"sbe.serial_no = %(serial_no)s",
+	]
+
+	if _has_column("Serial and Batch Bundle", "is_cancelled"):
+		conditions.append("IFNULL(bundle.is_cancelled, 0) = 0")
+	if _has_column("Serial and Batch Bundle", "type_of_transaction"):
+		conditions.append("bundle.type_of_transaction = 'Inward'")
+	if _has_column("Serial and Batch Entry", "qty"):
+		conditions.append("sbe.qty > 0")
+	if outgoing_cutoff and _has_column("Serial and Batch Bundle", "posting_datetime"):
+		conditions.append("bundle.posting_datetime <= %(outgoing_cutoff)s")
+
+	order_by = (
+		"bundle.posting_datetime DESC, bundle.creation DESC"
+		if _has_column("Serial and Batch Bundle", "posting_datetime")
+		else "bundle.creation DESC"
+	)
+	rows = frappe.db.sql(
+		f"""
+		SELECT
+			bundle.voucher_no AS purchase_receipt,
+			{detail_field} AS purchase_receipt_item,
+			{incoming_rate_field} AS incoming_rate
+		FROM `tabSerial and Batch Entry` sbe
+		INNER JOIN `tabSerial and Batch Bundle` bundle ON bundle.name = sbe.parent
+		INNER JOIN `tabPurchase Receipt` pr ON pr.name = bundle.voucher_no
+		WHERE {" AND ".join(conditions)}
+		ORDER BY {order_by}
+		LIMIT 1
+		""",
+		{
+			"item_code": item_code,
+			"serial_no": serial_no,
+			"outgoing_cutoff": outgoing_cutoff,
+		},
+		as_dict=True,
+	)
+	if not rows:
+		return None
+
+	row = rows[0]
+	rate = abs(flt(row.get("incoming_rate")))
+	if not rate:
+		rate = _get_purchase_receipt_ledger_rate(
+			row.get("purchase_receipt"), row.get("purchase_receipt_item"), item_code
+		)
+
+	return rate, row.get("purchase_receipt")
+
+
+def _get_legacy_serial_purchase_receipt_rate(item_code, serial_no, outgoing_cutoff=None):
+	if not _has_column("Stock Ledger Entry", "serial_no"):
+		return None
 
 	conditions = [
-		"voucher_type = 'Sales Invoice'",
-		"voucher_no = %(sales_invoice)s",
-		"item_code = %(item_code)s",
-		"actual_qty < 0",
+		"sle.voucher_type = 'Purchase Receipt'",
+		"sle.item_code = %(item_code)s",
+		"sle.actual_qty > 0",
+		"IFNULL(sle.serial_no, '') != ''",
+		"sle.serial_no LIKE %(serial_pattern)s",
+		"pr.docstatus = 1",
 	]
-	params = {
-		"sales_invoice": item.get("sales_invoice"),
-		"sales_invoice_item": item.get("sales_invoice_item"),
-		"item_code": item.get("item_code"),
-	}
-
-	if _has_column("Stock Ledger Entry", "voucher_detail_no") and item.get("sales_invoice_item"):
-		detail_cost = _query_stock_ledger_average(
-			conditions + ["voucher_detail_no = %(sales_invoice_item)s"],
-			params,
+	if _has_column("Stock Ledger Entry", "is_cancelled"):
+		conditions.append("IFNULL(sle.is_cancelled, 0) = 0")
+	if outgoing_cutoff:
+		conditions.append(
+			"(sle.posting_date < %(cutoff_date)s"
+			" OR (sle.posting_date = %(cutoff_date)s AND sle.posting_time <= %(cutoff_time)s))"
 		)
-		if detail_cost:
-			return detail_cost
 
-	return _query_stock_ledger_average(conditions, params)
+	fields = [
+		"sle.voucher_no AS purchase_receipt",
+		"sle.serial_no",
+		"sle.actual_qty",
+		"sle.stock_value_difference",
+	]
+	if _has_column("Stock Ledger Entry", "voucher_detail_no"):
+		fields.append("sle.voucher_detail_no AS purchase_receipt_item")
+	if _has_column("Stock Ledger Entry", "incoming_rate"):
+		fields.append("sle.incoming_rate")
+	if _has_column("Stock Ledger Entry", "valuation_rate"):
+		fields.append("sle.valuation_rate")
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT {", ".join(fields)}
+		FROM `tabStock Ledger Entry` sle
+		INNER JOIN `tabPurchase Receipt` pr ON pr.name = sle.voucher_no
+		WHERE {" AND ".join(conditions)}
+		ORDER BY sle.posting_date DESC, sle.posting_time DESC, sle.creation DESC
+		""",
+		{
+			"item_code": item_code,
+			"serial_pattern": f"%{serial_no}%",
+			"cutoff_date": outgoing_cutoff.date() if outgoing_cutoff else None,
+			"cutoff_time": outgoing_cutoff.time() if outgoing_cutoff else None,
+		},
+		as_dict=True,
+	)
+	for row in rows:
+		if serial_no not in _split_serial_numbers(row.get("serial_no")):
+			continue
+
+		rate = _get_incoming_ledger_row_rate(row)
+		return rate, row.get("purchase_receipt")
+
+	return None
 
 
-def _get_stock_ledger_average(component):
-	if component.get("parenttype") != "Delivery Note":
+def _get_serial_master_purchase_receipt_rate(item_code, serial_no, outgoing_cutoff=None):
+	if not _has_column("Serial No", "purchase_document_no"):
+		return None
+
+	serial = frappe.db.get_value(
+		"Serial No",
+		{"name": serial_no, "item_code": item_code},
+		["purchase_document_no", "purchase_rate"],
+		as_dict=True,
+	)
+	if not serial or not serial.get("purchase_document_no"):
+		return None
+
+	is_submitted = frappe.db.get_value("Purchase Receipt", serial.get("purchase_document_no"), "docstatus")
+	if is_submitted != 1:
+		return None
+
+	if outgoing_cutoff:
+		receipt_posting = frappe.db.get_value(
+			"Purchase Receipt",
+			serial.get("purchase_document_no"),
+			["posting_date", "posting_time"],
+			as_dict=True,
+		)
+		if receipt_posting:
+			receipt_datetime = get_datetime(
+				f"{receipt_posting.get('posting_date')} {receipt_posting.get('posting_time') or '00:00:00'}"
+			)
+			if receipt_datetime > outgoing_cutoff:
+				return None
+
+	rate = abs(flt(serial.get("purchase_rate")))
+	if not rate:
+		rate = _get_purchase_receipt_ledger_rate(serial.get("purchase_document_no"), None, item_code)
+
+	return rate, serial.get("purchase_document_no")
+
+
+def _get_purchase_receipt_ledger_rate(purchase_receipt, purchase_receipt_item, item_code):
+	if not purchase_receipt:
 		return 0
 
 	conditions = [
-		"voucher_type = 'Delivery Note'",
-		"voucher_no = %(delivery_note)s",
+		"voucher_type = 'Purchase Receipt'",
+		"voucher_no = %(purchase_receipt)s",
+		"item_code = %(item_code)s",
+		"actual_qty > 0",
+	]
+	params = {"purchase_receipt": purchase_receipt, "item_code": item_code}
+
+	if _has_column("Stock Ledger Entry", "is_cancelled"):
+		conditions.append("IFNULL(is_cancelled, 0) = 0")
+	if purchase_receipt_item and _has_column("Stock Ledger Entry", "voucher_detail_no"):
+		conditions.append("voucher_detail_no = %(purchase_receipt_item)s")
+		params["purchase_receipt_item"] = purchase_receipt_item
+
+	fields = ["actual_qty", "stock_value_difference"]
+	for fieldname in ("incoming_rate", "valuation_rate"):
+		if _has_column("Stock Ledger Entry", fieldname):
+			fields.append(fieldname)
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT {", ".join(fields)}
+		FROM `tabStock Ledger Entry`
+		WHERE {" AND ".join(conditions)}
+		ORDER BY posting_date DESC, posting_time DESC, creation DESC
+		LIMIT 1
+		""",
+		params,
+		as_dict=True,
+	)
+	if not rows:
+		return 0
+
+	return _get_incoming_ledger_row_rate(rows[0])
+
+
+def _get_incoming_ledger_row_rate(row):
+	rate = abs(flt(row.get("incoming_rate")))
+	if rate:
+		return rate
+
+	qty = abs(flt(row.get("actual_qty")))
+	amount = abs(flt(row.get("stock_value_difference")))
+	if qty and amount:
+		return amount / qty
+
+	return abs(flt(row.get("valuation_rate")))
+
+
+def _get_fifo_stock_ledger_average(row):
+	ledger_rows = _get_outgoing_stock_ledger_rows(
+		row,
+		("actual_qty", "outgoing_rate", "stock_value_difference", "valuation_rate"),
+	)
+	if not ledger_rows:
+		return None
+
+	total_qty = 0
+	total_cost = 0
+	for ledger_row in ledger_rows:
+		qty = abs(flt(ledger_row.get("actual_qty")))
+		if not qty:
+			continue
+
+		amount = abs(flt(ledger_row.get("stock_value_difference")))
+		if not amount:
+			rate = abs(flt(ledger_row.get("outgoing_rate")))
+			amount = qty * rate
+		if not amount:
+			amount = qty * abs(flt(ledger_row.get("valuation_rate")))
+
+		total_qty += qty
+		total_cost += amount
+
+	return total_cost / total_qty if total_qty else None
+
+
+def _get_outgoing_cutoff(row, cost_context):
+	reference = _get_outgoing_reference(row)
+	if reference not in cost_context["outgoing_cutoffs"]:
+		rows = _get_outgoing_stock_ledger_rows(row, ("posting_datetime", "posting_date", "posting_time"))
+		cutoffs = []
+		for ledger_row in rows:
+			if ledger_row.get("posting_datetime"):
+				cutoffs.append(get_datetime(ledger_row.get("posting_datetime")))
+			elif ledger_row.get("posting_date"):
+				cutoffs.append(
+					get_datetime(
+						f"{ledger_row.get('posting_date')} {ledger_row.get('posting_time') or '00:00:00'}"
+					)
+				)
+
+		cost_context["outgoing_cutoffs"][reference] = max(cutoffs) if cutoffs else None
+
+	return cost_context["outgoing_cutoffs"][reference]
+
+
+def _get_outgoing_stock_ledger_rows(row, requested_fields):
+	voucher_type, voucher_no, voucher_detail_no = _get_outgoing_reference(row)
+	if not voucher_type or not voucher_no:
+		return []
+
+	available_fields = [
+		fieldname for fieldname in requested_fields if _has_column("Stock Ledger Entry", fieldname)
+	]
+	if not available_fields:
+		return []
+
+	conditions = [
+		"voucher_type = %(voucher_type)s",
+		"voucher_no = %(voucher_no)s",
 		"item_code = %(item_code)s",
 		"actual_qty < 0",
 	]
 	params = {
-		"delivery_note": component.get("parent"),
-		"item_code": component.get("item_code"),
-		"packed_item": component.get("name"),
+		"voucher_type": voucher_type,
+		"voucher_no": voucher_no,
+		"item_code": row.get("item_code"),
 	}
+	if _has_column("Stock Ledger Entry", "is_cancelled"):
+		conditions.append("IFNULL(is_cancelled, 0) = 0")
+	if row.get("warehouse") and _has_column("Stock Ledger Entry", "warehouse"):
+		conditions.append("warehouse = %(warehouse)s")
+		params["warehouse"] = row.get("warehouse")
 
-	if _has_column("Stock Ledger Entry", "voucher_detail_no") and component.get("name"):
-		detail_cost = _query_stock_ledger_average(conditions + ["voucher_detail_no = %(packed_item)s"], params)
-		if detail_cost:
-			return detail_cost
-
-	return _query_stock_ledger_average(conditions, params)
-
-
-def _query_stock_ledger_average(conditions, params):
-	rate_field = None
-	for fieldname in ("valuation_rate", "incoming_rate"):
-		if _has_column("Stock Ledger Entry", fieldname):
-			rate_field = fieldname
-			break
-
-	if rate_field:
-		row = frappe.db.sql(
-			f"""
-			SELECT
-				SUM(ABS(actual_qty)) AS qty,
-				SUM(ABS(actual_qty) * ABS({rate_field})) AS amount
-			FROM `tabStock Ledger Entry`
-			WHERE {" AND ".join(conditions)}
-				AND IFNULL({rate_field}, 0) != 0
-			""",
-			params,
-			as_dict=True,
+	if voucher_detail_no and _has_column("Stock Ledger Entry", "voucher_detail_no"):
+		detail_rows = _query_outgoing_stock_ledger_rows(
+			[*conditions, "voucher_detail_no = %(voucher_detail_no)s"],
+			{**params, "voucher_detail_no": voucher_detail_no},
+			available_fields,
 		)
+		if detail_rows:
+			return detail_rows
 
-		if row:
-			qty = flt(row[0].get("qty"))
-			amount = flt(row[0].get("amount"))
-			if qty:
-				return amount / qty
+	return _query_outgoing_stock_ledger_rows(conditions, params, available_fields)
 
-	row = frappe.db.sql(
+
+def _query_outgoing_stock_ledger_rows(conditions, params, fields):
+	return frappe.db.sql(
 		f"""
-		SELECT
-			SUM(ABS(actual_qty)) AS qty,
-			SUM(ABS(stock_value_difference)) AS amount
+		SELECT {", ".join(fields)}
 		FROM `tabStock Ledger Entry`
 		WHERE {" AND ".join(conditions)}
+		ORDER BY posting_date, posting_time, creation
 		""",
 		params,
 		as_dict=True,
 	)
 
-	if not row:
-		return 0
 
-	qty = flt(row[0].get("qty"))
-	amount = flt(row[0].get("amount"))
-	return (amount / qty) if qty else 0
+def _get_outgoing_reference(row):
+	if row.get("delivery_note"):
+		return "Delivery Note", row.get("delivery_note"), row.get("dn_detail")
+
+	if row.get("parenttype") in ("Delivery Note", "Sales Invoice"):
+		return row.get("parenttype"), row.get("parent"), row.get("name")
+
+	if row.get("sales_invoice"):
+		return "Sales Invoice", row.get("sales_invoice"), row.get("sales_invoice_item")
+
+	return None, None, None
 
 
 def _has_column(doctype, fieldname):
@@ -632,6 +1009,16 @@ def get_report_summary(data):
 	return [
 		{"value": sales_amount, "indicator": "Blue", "label": _("Sales Amount"), "datatype": "Currency"},
 		{"value": cost_amount, "indicator": "Orange", "label": _("Bundle Cost"), "datatype": "Currency"},
-		{"value": gross_profit, "indicator": "Green" if gross_profit >= 0 else "Red", "label": _("Gross Profit"), "datatype": "Currency"},
-		{"value": gross_profit_percent, "indicator": "Green" if gross_profit >= 0 else "Red", "label": _("Gross Profit %"), "datatype": "Percent"},
+		{
+			"value": gross_profit,
+			"indicator": "Green" if gross_profit >= 0 else "Red",
+			"label": _("Gross Profit"),
+			"datatype": "Currency",
+		},
+		{
+			"value": gross_profit_percent,
+			"indicator": "Green" if gross_profit >= 0 else "Red",
+			"label": _("Gross Profit %"),
+			"datatype": "Percent",
+		},
 	]
