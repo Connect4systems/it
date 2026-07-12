@@ -91,7 +91,12 @@ def get_columns():
 def get_data(filters):
 	rows = []
 	invoice_items = _get_sales_invoice_items(filters)
-	cost_context = {"has_serial_no": {}, "outgoing_cutoffs": {}, "serial_rates": {}}
+	cost_context = {
+		"has_serial_no": {},
+		"outgoing_cutoffs": {},
+		"serial_rates": {},
+		"valuation_rates": {},
+	}
 
 	for item in invoice_items:
 		_resolve_delivery_note_link(item)
@@ -105,6 +110,7 @@ def get_data(filters):
 		if is_bundle:
 			total_cost = 0
 			for component in components:
+				component.setdefault("posting_date", item.posting_date)
 				qty = abs(flt(component.get("stock_qty") or component.get("qty")))
 				avg_cost, cost_amount, cost_basis = _get_component_cost(component, cost_context)
 				total_cost += cost_amount
@@ -555,6 +561,7 @@ def _get_serialized_item_cost(row, qty, cost_context):
 	total_cost = 0
 	missing_serials = []
 	purchase_receipts = set()
+	valuation_dates = set()
 
 	for serial_no in serial_numbers:
 		cache_key = (row.get("item_code"), serial_no, str(outgoing_cutoff or ""))
@@ -564,14 +571,14 @@ def _get_serialized_item_cost(row, qty, cost_context):
 			)
 
 		serial_rate = cost_context["serial_rates"][cache_key]
-		if not serial_rate:
-			missing_serials.append(serial_no)
-			continue
-
-		rate, purchase_receipt = serial_rate
-		if rate is None:
-			missing_serials.append(serial_no)
-			continue
+		rate, purchase_receipt = serial_rate if serial_rate else (None, None)
+		if not abs(flt(rate)):
+			valuation_rate = _get_cached_closest_valuation_rate(row, outgoing_cutoff, cost_context)
+			if not valuation_rate:
+				missing_serials.append(serial_no)
+				continue
+			rate, valuation_date = valuation_rate
+			valuation_dates.add(str(valuation_date))
 
 		total_cost += abs(flt(rate))
 		if purchase_receipt:
@@ -582,12 +589,75 @@ def _get_serialized_item_cost(row, qty, cost_context):
 
 	if purchase_receipts:
 		basis_parts.append(", ".join(sorted(purchase_receipts)))
+	if valuation_dates:
+		basis_parts.append(
+			_("Closest Stock Ledger valuation ({0})").format(", ".join(sorted(valuation_dates)))
+		)
 	if flt(len(serial_numbers)) != flt(qty):
 		basis_parts.append(_("serial quantity {0}, stock quantity {1}").format(len(serial_numbers), qty))
 	if missing_serials:
 		basis_parts.append(_("missing: {0}").format(", ".join(missing_serials)))
 
 	return average_cost, total_cost, "; ".join(basis_parts)
+
+
+def _get_cached_closest_valuation_rate(row, outgoing_cutoff, cost_context):
+	reference_datetime = outgoing_cutoff
+	if not reference_datetime and row.get("posting_date"):
+		reference_datetime = get_datetime(row.get("posting_date"))
+	if not reference_datetime:
+		return None
+
+	cache = cost_context.setdefault("valuation_rates", {})
+	cache_key = (row.get("item_code"), row.get("warehouse"), str(reference_datetime))
+	if cache_key not in cache:
+		cache[cache_key] = _get_closest_valuation_rate(
+			row.get("item_code"), reference_datetime, row.get("warehouse")
+		)
+
+	return cache[cache_key]
+
+
+def _get_closest_valuation_rate(item_code, reference_datetime, warehouse=None):
+	if not item_code or not reference_datetime or not _has_column("Stock Ledger Entry", "valuation_rate"):
+		return None
+
+	conditions = [
+		"item_code = %(item_code)s",
+		"ABS(IFNULL(valuation_rate, 0)) > 0",
+	]
+	params = {"item_code": item_code, "reference_datetime": reference_datetime}
+	if _has_column("Stock Ledger Entry", "is_cancelled"):
+		conditions.append("IFNULL(is_cancelled, 0) = 0")
+	if warehouse and _has_column("Stock Ledger Entry", "warehouse"):
+		conditions.append("warehouse = %(warehouse)s")
+		params["warehouse"] = warehouse
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT valuation_rate, posting_date, posting_time
+		FROM `tabStock Ledger Entry`
+		WHERE {" AND ".join(conditions)}
+		ORDER BY
+			ABS(TIMESTAMPDIFF(SECOND,
+				TIMESTAMP(posting_date, IFNULL(posting_time, '00:00:00')),
+				%(reference_datetime)s
+			)) ASC,
+			posting_date DESC, posting_time DESC, creation DESC
+		LIMIT 1
+		""",
+		params,
+		as_dict=True,
+	)
+	if not rows:
+		return None
+
+	ledger_row = rows[0]
+	rate = abs(flt(ledger_row.get("valuation_rate")))
+	valuation_datetime = get_datetime(
+		f"{ledger_row.get('posting_date')} {ledger_row.get('posting_time') or '00:00:00'}"
+	)
+	return rate, valuation_datetime
 
 
 def _get_outgoing_serial_numbers(row):

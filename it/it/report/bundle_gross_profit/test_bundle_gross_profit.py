@@ -52,6 +52,27 @@ class TestBundleGrossProfit(FrappeTestCase):
 		self.assertEqual(cost_amount, 100)
 		self.assertIn("SER-MISSING", cost_basis)
 
+	@patch.object(bundle_gross_profit, "_get_closest_valuation_rate")
+	@patch.object(bundle_gross_profit, "_get_purchase_receipt_serial_rate")
+	@patch.object(bundle_gross_profit, "_get_outgoing_serial_numbers")
+	def test_missing_serial_purchase_cost_uses_closest_valuation(
+		self, get_serial_numbers, get_serial_rate, get_valuation_rate
+	):
+		get_serial_numbers.return_value = ["SER-1", "SER-2"]
+		get_serial_rate.side_effect = [(100, "MAT-PRE-0001"), None]
+		get_valuation_rate.return_value = (115, "2026-07-10 12:00:00")
+
+		average_cost, cost_amount, cost_basis = bundle_gross_profit._get_serialized_item_cost(
+			frappe._dict(item_code="SERIAL-ITEM", posting_date="2026-07-11"),
+			2,
+			{"has_serial_no": {}, "outgoing_cutoffs": {}, "serial_rates": {}},
+		)
+
+		self.assertEqual(average_cost, 107.5)
+		self.assertEqual(cost_amount, 215)
+		self.assertIn("Closest Stock Ledger valuation", cost_basis)
+		self.assertNotIn("missing:", cost_basis)
+
 	@patch.object(bundle_gross_profit, "_get_outgoing_stock_ledger_rows")
 	def test_fifo_cost_uses_outgoing_stock_value(self, get_ledger_rows):
 		get_ledger_rows.return_value = [
