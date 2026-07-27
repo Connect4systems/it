@@ -584,7 +584,9 @@ def _get_serialized_item_cost(row, qty, cost_context):
 		if purchase_receipt:
 			purchase_receipts.add(purchase_receipt)
 
-	average_cost = total_cost / qty
+	serial_qty = len(serial_numbers)
+	average_cost = total_cost / serial_qty
+	cost_amount = qty * average_cost
 	basis_parts = [_("Serial Purchase Receipt")]
 
 	if purchase_receipts:
@@ -593,12 +595,12 @@ def _get_serialized_item_cost(row, qty, cost_context):
 		basis_parts.append(
 			_("Closest Stock Ledger valuation ({0})").format(", ".join(sorted(valuation_dates)))
 		)
-	if flt(len(serial_numbers)) != flt(qty):
-		basis_parts.append(_("serial quantity {0}, stock quantity {1}").format(len(serial_numbers), qty))
+	if flt(serial_qty) != flt(qty):
+		basis_parts.append(_("serial quantity {0}, stock quantity {1}").format(serial_qty, qty))
 	if missing_serials:
 		basis_parts.append(_("missing: {0}").format(", ".join(missing_serials)))
 
-	return average_cost, total_cost, "; ".join(basis_parts)
+	return average_cost, cost_amount, "; ".join(basis_parts)
 
 
 def _get_cached_closest_valuation_rate(row, outgoing_cutoff, cost_context):
@@ -663,16 +665,15 @@ def _get_closest_valuation_rate(item_code, reference_datetime, warehouse=None):
 def _get_outgoing_serial_numbers(row):
 	serial_numbers = []
 
-	if row.get("serial_and_batch_bundle"):
-		serial_numbers.extend(_get_bundle_serial_numbers(row.get("serial_and_batch_bundle")))
-
-	serial_numbers.extend(_split_serial_numbers(row.get("serial_no")))
+	for ledger_row in _get_outgoing_stock_ledger_rows(row, ("serial_no", "serial_and_batch_bundle")):
+		if ledger_row.get("serial_and_batch_bundle"):
+			serial_numbers.extend(_get_bundle_serial_numbers(ledger_row.get("serial_and_batch_bundle")))
+		serial_numbers.extend(_split_serial_numbers(ledger_row.get("serial_no")))
 
 	if not serial_numbers:
-		for ledger_row in _get_outgoing_stock_ledger_rows(row, ("serial_no", "serial_and_batch_bundle")):
-			if ledger_row.get("serial_and_batch_bundle"):
-				serial_numbers.extend(_get_bundle_serial_numbers(ledger_row.get("serial_and_batch_bundle")))
-			serial_numbers.extend(_split_serial_numbers(ledger_row.get("serial_no")))
+		if row.get("serial_and_batch_bundle"):
+			serial_numbers.extend(_get_bundle_serial_numbers(row.get("serial_and_batch_bundle")))
+		serial_numbers.extend(_split_serial_numbers(row.get("serial_no")))
 
 	return list(dict.fromkeys(serial_numbers))
 

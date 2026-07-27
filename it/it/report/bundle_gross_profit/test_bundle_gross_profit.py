@@ -73,6 +73,39 @@ class TestBundleGrossProfit(FrappeTestCase):
 		self.assertIn("Closest Stock Ledger valuation", cost_basis)
 		self.assertNotIn("missing:", cost_basis)
 
+	@patch.object(bundle_gross_profit, "_get_purchase_receipt_serial_rate")
+	@patch.object(bundle_gross_profit, "_get_outgoing_serial_numbers")
+	def test_serial_cost_is_normalized_before_applying_stock_qty(
+		self, get_serial_numbers, get_serial_rate
+	):
+		get_serial_numbers.return_value = ["SER-1", "SER-2", "SER-3", "SER-4", "SER-5"]
+		get_serial_rate.side_effect = [(69842.36, "MAT-PRE-2026-00243")] * 5
+
+		average_cost, cost_amount, cost_basis = bundle_gross_profit._get_serialized_item_cost(
+			frappe._dict(item_code="21S7S3W90A"),
+			3,
+			{"has_serial_no": {}, "outgoing_cutoffs": {}, "serial_rates": {}},
+		)
+
+		self.assertAlmostEqual(average_cost, 69842.36)
+		self.assertAlmostEqual(cost_amount, 209527.08)
+		self.assertIn("serial quantity 5, stock quantity 3", cost_basis)
+
+	@patch.object(bundle_gross_profit, "_get_bundle_serial_numbers")
+	@patch.object(bundle_gross_profit, "_get_outgoing_stock_ledger_rows")
+	def test_outgoing_serials_prefer_stock_ledger_bundle(self, get_ledger_rows, get_bundle_serials):
+		get_ledger_rows.return_value = [
+			frappe._dict(serial_and_batch_bundle="OUTGOING-BUNDLE", serial_no=None)
+		]
+		get_bundle_serials.return_value = ["OUT-1", "OUT-2", "OUT-3"]
+
+		serial_numbers = bundle_gross_profit._get_outgoing_serial_numbers(
+			frappe._dict(serial_and_batch_bundle="WRONG-50-SERIAL-BUNDLE")
+		)
+
+		self.assertEqual(serial_numbers, ["OUT-1", "OUT-2", "OUT-3"])
+		get_bundle_serials.assert_called_once_with("OUTGOING-BUNDLE")
+
 	@patch.object(bundle_gross_profit, "_get_outgoing_stock_ledger_rows")
 	def test_fifo_cost_uses_outgoing_stock_value(self, get_ledger_rows):
 		get_ledger_rows.return_value = [
