@@ -101,31 +101,11 @@ class TestBundleGrossProfit(FrappeTestCase):
 
 		self.assertEqual(average_cost, 0)
 
-	@patch.object(bundle_gross_profit, "_has_column", return_value=True)
-	@patch.object(frappe.db, "sql")
-	def test_purchase_receipt_item_rate_uses_base_amount_per_stock_unit(self, db_sql, _has_column):
-		db_sql.return_value = [
-			frappe._dict(
-				base_net_amount=3492118.06,
-				stock_qty=50,
-				base_net_rate=69842.36,
-				conversion_factor=1,
-				base_rate=69842.36,
-			)
-		]
-
-		rate = bundle_gross_profit._get_purchase_receipt_item_rate(
-			"MAT-PRE-2026-00243", "PRI-ROW-1", "21S7S3W90A"
-		)
-
-		self.assertAlmostEqual(rate, 69842.3612)
-
 	@patch.object(bundle_gross_profit, "_get_purchase_receipt_ledger_rate")
-	@patch.object(bundle_gross_profit, "_get_purchase_receipt_item_rate")
 	@patch.object(bundle_gross_profit, "_has_column", return_value=True)
 	@patch.object(frappe.db, "sql")
-	def test_serial_bundle_prefers_purchase_receipt_item_rate(
-		self, db_sql, _has_column, get_receipt_item_rate, get_ledger_rate
+	def test_serial_bundle_prefers_purchase_receipt_stock_ledger_rate(
+		self, db_sql, _has_column, get_ledger_rate
 	):
 		db_sql.return_value = [
 			frappe._dict(
@@ -134,7 +114,7 @@ class TestBundleGrossProfit(FrappeTestCase):
 				incoming_rate=116403.94,
 			)
 		]
-		get_receipt_item_rate.return_value = 69842.36
+		get_ledger_rate.return_value = 69842.36
 
 		rate, purchase_receipt = bundle_gross_profit._get_serial_bundle_purchase_receipt_rate(
 			"21S7S3W90A", "SER-1"
@@ -142,4 +122,3 @@ class TestBundleGrossProfit(FrappeTestCase):
 
 		self.assertEqual(rate, 69842.36)
 		self.assertEqual(purchase_receipt, "MAT-PRE-2026-00243")
-		get_ledger_rate.assert_not_called()

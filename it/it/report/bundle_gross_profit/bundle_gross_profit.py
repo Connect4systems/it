@@ -775,15 +775,11 @@ def _get_serial_bundle_purchase_receipt_rate(item_code, serial_no, outgoing_cuto
 		return None
 
 	row = rows[0]
-	rate = _get_purchase_receipt_item_rate(
+	rate = _get_purchase_receipt_ledger_rate(
 		row.get("purchase_receipt"), row.get("purchase_receipt_item"), item_code
 	)
 	if not rate:
 		rate = abs(flt(row.get("incoming_rate")))
-	if not rate:
-		rate = _get_purchase_receipt_ledger_rate(
-			row.get("purchase_receipt"), row.get("purchase_receipt_item"), item_code
-		)
 
 	return rate, row.get("purchase_receipt")
 
@@ -841,11 +837,7 @@ def _get_legacy_serial_purchase_receipt_rate(item_code, serial_no, outgoing_cuto
 		if serial_no not in _split_serial_numbers(row.get("serial_no")):
 			continue
 
-		rate = _get_purchase_receipt_item_rate(
-			row.get("purchase_receipt"), row.get("purchase_receipt_item"), item_code
-		)
-		if not rate:
-			rate = _get_incoming_ledger_row_rate(row)
+		rate = _get_incoming_ledger_row_rate(row)
 		return rate, row.get("purchase_receipt")
 
 	return None
@@ -882,71 +874,11 @@ def _get_serial_master_purchase_receipt_rate(item_code, serial_no, outgoing_cuto
 			if receipt_datetime > outgoing_cutoff:
 				return None
 
-	rate = _get_purchase_receipt_item_rate(serial.get("purchase_document_no"), None, item_code)
+	rate = _get_purchase_receipt_ledger_rate(serial.get("purchase_document_no"), None, item_code)
 	if not rate:
 		rate = abs(flt(serial.get("purchase_rate")))
-	if not rate:
-		rate = _get_purchase_receipt_ledger_rate(serial.get("purchase_document_no"), None, item_code)
 
 	return rate, serial.get("purchase_document_no")
-
-
-def _get_purchase_receipt_item_rate(purchase_receipt, purchase_receipt_item, item_code):
-	if not purchase_receipt or not item_code:
-		return 0
-
-	fields = []
-	for fieldname in (
-		"base_net_amount",
-		"stock_qty",
-		"base_net_rate",
-		"conversion_factor",
-		"base_rate",
-	):
-		if _has_column("Purchase Receipt Item", fieldname):
-			fields.append(f"pri.{fieldname}")
-
-	if not fields:
-		return 0
-
-	conditions = [
-		"pr.name = %(purchase_receipt)s",
-		"pr.docstatus = 1",
-		"pri.item_code = %(item_code)s",
-	]
-	params = {"purchase_receipt": purchase_receipt, "item_code": item_code}
-	if purchase_receipt_item:
-		conditions.append("pri.name = %(purchase_receipt_item)s")
-		params["purchase_receipt_item"] = purchase_receipt_item
-
-	rows = frappe.db.sql(
-		f"""
-		SELECT {", ".join(fields)}
-		FROM `tabPurchase Receipt Item` pri
-		INNER JOIN `tabPurchase Receipt` pr ON pr.name = pri.parent
-		WHERE {" AND ".join(conditions)}
-		ORDER BY pri.idx
-		LIMIT 1
-		""",
-		params,
-		as_dict=True,
-	)
-	if not rows:
-		return 0
-
-	row = rows[0]
-	stock_qty = abs(flt(row.get("stock_qty")))
-	base_net_amount = abs(flt(row.get("base_net_amount")))
-	if stock_qty and base_net_amount:
-		return base_net_amount / stock_qty
-
-	conversion_factor = abs(flt(row.get("conversion_factor"))) or 1
-	for fieldname in ("base_net_rate", "base_rate"):
-		rate = abs(flt(row.get(fieldname)))
-		if rate:
-			return rate / conversion_factor
-
-	return 0
 
 
 def _get_purchase_receipt_ledger_rate(purchase_receipt, purchase_receipt_item, item_code):
