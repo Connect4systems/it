@@ -13,7 +13,7 @@
  "is_hidden": 0,
  "label": "CEO",
  "links": [],
- "modified": "2026-06-02 21:28:08.823709",
+ "modified": "2026-09-27 12:33:28.193495",
  "modified_by": "Administrator",
  "module": "It",
  "name": "CEO",
@@ -42,6 +42,9 @@
  "roles": [
   {
    "role": "CEO"
+  },
+  {
+   "role": "Accounts Manager"
   }
  ],
  "sequence_id": 1.0,
