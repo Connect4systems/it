@@ -116,6 +116,12 @@ def get_data(filters):
 	for item in _get_sales_invoice_items(filters):
 		non_stock = _is_non_stock_service(item)
 		sources, issue = ([], None) if non_stock else invoice_sources(item)
+		if (
+			filters.get("delivery_note")
+			and item.get("delivery_note") != filters.delivery_note
+			and not any(s.get("delivery_note") == filters.delivery_note for s in sources)
+		):
+			continue
 		component_rows = []
 		allocations = []
 		total_cost = 0
@@ -136,6 +142,8 @@ def get_data(filters):
 					if cost_row.parenttype == "Delivery Note":
 						cost_row.stock_qty = stock_qty(cost_row) * source.allocation_ratio
 				actual, amount, cost_basis = ledger_cost(cost_row)
+				if source.get("allocation_basis"):
+					cost_basis = source.allocation_basis + "; " + cost_basis
 				average = None
 				if amount is not None:
 					average = _get_item_cost(cost_row, abs(stock_qty(cost_row)), cost_context)[0]
@@ -190,6 +198,9 @@ def get_data(filters):
 		delivery_notes = sorted(
 			{s.delivery_note for s in sources if s.get("delivery_note") and not s.get("update_stock")}
 		)
+		bundle_basis = _("Sum of actual component costs")
+		if any(s.get("allocation_basis") for s in sources):
+			bundle_basis += "; " + _("Sales Order item allocation (posting order)")
 		rows.append(
 			{
 				"indent": 0,
@@ -206,8 +217,7 @@ def get_data(filters):
 				"actual_cost": total_cost / stock_qty(item)
 				if stock_qty(item) and not is_bundle and not issue
 				else None,
-				"cost_basis": issue
-				or (_("Sum of actual component costs") if is_bundle else "; ".join(dict.fromkeys(basis))),
+				"cost_basis": issue or (bundle_basis if is_bundle else "; ".join(dict.fromkeys(basis))),
 				"cost_amount": total_cost if allocations or not issue else None,
 				"sales_amount": sales_amount,
 				"gross_profit": gross_profit,
@@ -371,6 +381,14 @@ def _get_delivery_note_filter_condition():
 			AND dni_filter.item_code = sii.item_code
 			AND (dni_filter.si_detail = sii.name
 				OR (dni_filter.against_sales_invoice = si.name AND IFNULL(dni_filter.si_detail, '') = ''))
+	) OR EXISTS (
+		SELECT 1 FROM `tabDelivery Note Item` order_dni
+		INNER JOIN `tabDelivery Note` order_dn ON order_dn.name = order_dni.parent
+		WHERE order_dn.docstatus = 1 AND order_dn.company = si.company
+			AND order_dni.parent = %(delivery_note)s AND order_dni.item_code = sii.item_code
+			AND order_dni.against_sales_order = sii.sales_order AND order_dni.so_detail = sii.so_detail
+			AND IFNULL(sii.so_detail, '') != '' AND sii.stock_qty > 0
+			AND IFNULL(sii.delivery_note, '') = '' AND IFNULL(sii.dn_detail, '') = ''
 	)"""
 
 

@@ -92,7 +92,9 @@ def execute_reconciliation(filters, invoice_rows):
 		"Invoice costs use invoice dates; GL uses posting dates and the selected COGS account "
 		"(or all accessible accounts of type Cost of Goods Sold). Opening entries are excluded. "
 		"Unmatched deliveries can be uninvoiced, outside the invoice period, or missing a link. "
-		"Other vouchers are shown as COGS adjustments. Review incomplete costs before interpreting profit."
+		"Other vouchers are shown as COGS adjustments. Unlinked invoices created from Sales Orders "
+		"use available delivery quantities on the exact order item in posting order, after explicit links. "
+		"Review incomplete costs before interpreting profit."
 	)
 	return columns, data, message, None, summary, True
 

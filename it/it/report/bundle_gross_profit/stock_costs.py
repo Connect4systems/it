@@ -1,4 +1,4 @@
-"""Explicit invoice/delivery allocation and signed stock costs for Bundle Gross Profit."""
+"""Invoice/delivery allocation and signed stock costs for Bundle Gross Profit."""
 
 import frappe
 from frappe import _
@@ -11,7 +11,7 @@ def stock_qty(row):
 
 
 def invoice_sources(item):
-	"""Never infer a delivery from a shared Sales Order or a return's original issue."""
+	"""Prefer explicit links, then allocate unlinked sales through the exact order item."""
 	if item.get("update_stock"):
 		source = frappe._dict(item)
 		source.update(allocation_ratio=1, delivery_note=None, dn_detail=None)
@@ -49,6 +49,8 @@ def invoice_sources(item):
 		as_dict=True,
 	)
 	if not deliveries:
+		if not item.get("delivery_note") and not item.get("dn_detail"):
+			return sales_order_sources(item)
 		return [], _("No explicitly linked stock movement; check delivery/return links")
 	if not item.get("dn_detail") and item.get("delivery_note"):
 		ambiguous = [
@@ -110,6 +112,101 @@ def invoice_sources(item):
 		if remaining > 0.000001
 		else None
 	)
+
+
+def sales_order_sources(item):
+	# A credit note does not prove a physical return, even on the same order item.
+	if stock_qty(item) <= 0 or not item.get("sales_order") or not item.get("so_detail"):
+		return [], _("No linked stock movement or exact Sales Order item; check delivery/return links")
+	params = {
+		"company": item.company,
+		"item_code": item.item_code,
+		"sales_order": item.sales_order,
+		"so_detail": item.so_detail,
+	}
+	deliveries = frappe.db.sql(
+		"""SELECT dni.name, dni.parent, dni.stock_qty, dni.warehouse,
+			dni.si_detail, dni.against_sales_invoice,
+			(SELECT SUM(sii.stock_qty) FROM `tabSales Invoice Item` sii
+			 INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+			 WHERE si.docstatus = 1 AND si.update_stock = 0 AND si.company = %(company)s
+				AND sii.item_code = %(item_code)s AND sii.stock_qty > 0
+				AND (sii.dn_detail = dni.name OR (sii.delivery_note = dni.parent
+					AND IFNULL(sii.dn_detail, '') = ''))) AS reserved_qty
+		FROM `tabDelivery Note Item` dni
+		INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+		WHERE dn.docstatus = 1 AND dn.company = %(company)s AND dni.stock_qty > 0
+			AND dni.item_code = %(item_code)s AND dni.against_sales_order = %(sales_order)s
+			AND dni.so_detail = %(so_detail)s
+		ORDER BY dn.posting_date, dn.posting_time, dn.name, dni.idx""",
+		params,
+		as_dict=True,
+	)
+	# Include every invoice on this order item, even outside the report's filters.
+	# Explicit/reverse links are reserved first; only unlinked invoices share the remainder.
+	invoices = frappe.db.sql(
+		"""SELECT sii.name, sii.stock_qty
+		FROM `tabSales Invoice Item` sii
+		INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+		WHERE si.docstatus = 1 AND si.update_stock = 0 AND si.company = %(company)s
+			AND sii.item_code = %(item_code)s AND sii.stock_qty > 0
+			AND sii.sales_order = %(sales_order)s AND sii.so_detail = %(so_detail)s
+			AND IFNULL(sii.delivery_note, '') = '' AND IFNULL(sii.dn_detail, '') = ''
+			AND NOT EXISTS (
+				SELECT 1 FROM `tabDelivery Note Item` linked
+				INNER JOIN `tabDelivery Note` linked_dn ON linked_dn.name = linked.parent
+				WHERE linked_dn.docstatus = 1 AND linked_dn.company = %(company)s
+					AND linked.item_code = sii.item_code AND linked.stock_qty > 0
+					AND (linked.si_detail = sii.name OR linked.against_sales_invoice = si.name))
+		ORDER BY si.posting_date, si.posting_time, si.name, sii.idx""",
+		params,
+		as_dict=True,
+	)
+	allocations = allocate_order_quantities(deliveries, invoices)
+	sources = []
+	for delivery, qty in allocations.get(item.sales_invoice_item, []):
+		source = frappe._dict(item)
+		source.update(
+			delivery_note=delivery.parent,
+			dn_detail=delivery.name,
+			warehouse=delivery.warehouse,
+			stock_qty=qty,
+			allocation_ratio=qty / stock_qty(delivery),
+			allocation_basis=_("Sales Order item allocation (posting order)"),
+		)
+		sources.append(source)
+	remaining = stock_qty(item) - sum(stock_qty(source) for source in sources)
+	issue = (
+		_("Sales Order item has insufficient unallocated delivery quantity; review remaining cost")
+		if remaining > 0.000001
+		else None
+	)
+	return sources, issue
+
+
+def allocate_order_quantities(deliveries, invoices):
+	"""Allocate chronological invoice demand to chronological stock, reserving explicit links."""
+	available = [
+		0
+		if d.get("si_detail") or d.get("against_sales_invoice")
+		else max(0, stock_qty(d) - flt(d.get("reserved_qty")))
+		for d in deliveries
+	]
+	allocations = {}
+	for invoice in invoices:
+		remaining = stock_qty(invoice)
+		allocated = []
+		for index, delivery in enumerate(deliveries):
+			qty = min(remaining, available[index])
+			if qty <= 0:
+				continue
+			allocated.append((delivery, qty))
+			available[index] -= qty
+			remaining -= qty
+			if remaining <= 0.000001:
+				break
+		allocations[invoice.name] = allocated
+	return allocations
 
 
 def ledger_cost(row):

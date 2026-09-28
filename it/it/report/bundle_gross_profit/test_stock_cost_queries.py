@@ -16,13 +16,16 @@ class TestStockCostQueries(TestCase):
 		self.db = sqlite3.connect(":memory:")
 		self.db.row_factory = sqlite3.Row
 		self.db.executescript("""
-			CREATE TABLE `tabSales Invoice` (name TEXT, company TEXT, docstatus INT, update_stock INT);
+			CREATE TABLE `tabSales Invoice` (name TEXT, company TEXT, docstatus INT, update_stock INT,
+				posting_date TEXT DEFAULT '2026-09-01', posting_time TEXT DEFAULT '10:00:00');
 			CREATE TABLE `tabSales Invoice Item` (name TEXT, parent TEXT, item_code TEXT,
-				stock_qty REAL, delivery_note TEXT, dn_detail TEXT);
+				stock_qty REAL, delivery_note TEXT, dn_detail TEXT, sales_order TEXT DEFAULT 'SO-1',
+				so_detail TEXT DEFAULT 'SOI-1', idx INT DEFAULT 1);
 			CREATE TABLE `tabDelivery Note` (name TEXT, company TEXT, docstatus INT,
 				posting_date TEXT, posting_time TEXT);
 			CREATE TABLE `tabDelivery Note Item` (name TEXT, parent TEXT, item_code TEXT, qty REAL,
-				stock_qty REAL, warehouse TEXT, si_detail TEXT, against_sales_invoice TEXT, idx INT);
+				stock_qty REAL, warehouse TEXT, si_detail TEXT, against_sales_invoice TEXT, idx INT,
+				against_sales_order TEXT DEFAULT 'SO-1', so_detail TEXT DEFAULT 'SOI-1');
 			CREATE TABLE `tabStock Ledger Entry` (company TEXT, voucher_type TEXT, voucher_no TEXT,
 				voucher_detail_no TEXT, item_code TEXT, is_cancelled INT, actual_qty REAL,
 				stock_value_difference REAL, posting_date TEXT, posting_time TEXT, creation TEXT);
@@ -39,9 +42,12 @@ class TestStockCostQueries(TestCase):
 		return [frappe._dict(dict(row)) for row in self.db.execute(query, params)]
 
 	def add_invoice(self, name="SI-1", detail="SII-1", qty=2, delivery="DN-1", dn_detail="DNI-1", status=1):
-		self.db.execute("INSERT INTO `tabSales Invoice` VALUES (?, 'YT', ?, 0)", (name, status))
 		self.db.execute(
-			"INSERT INTO `tabSales Invoice Item` VALUES (?, ?, 'ITEM', ?, ?, ?)",
+			"INSERT INTO `tabSales Invoice` (name, company, docstatus, update_stock) VALUES (?, 'YT', ?, 0)",
+			(name, status),
+		)
+		self.db.execute(
+			"INSERT INTO `tabSales Invoice Item` (name, parent, item_code, stock_qty, delivery_note, dn_detail) VALUES (?, ?, 'ITEM', ?, ?, ?)",
 			(detail, name, qty, delivery, dn_detail),
 		)
 
@@ -53,7 +59,7 @@ class TestStockCostQueries(TestCase):
 			(name, company, status),
 		)
 		self.db.execute(
-			"INSERT INTO `tabDelivery Note Item` VALUES (?, ?, 'ITEM', ?, ?, 'WH', ?, ?, 1)",
+			"INSERT INTO `tabDelivery Note Item` (name, parent, item_code, qty, stock_qty, warehouse, si_detail, against_sales_invoice, idx) VALUES (?, ?, 'ITEM', ?, ?, 'WH', ?, ?, 1)",
 			(detail, name, qty, qty, si_detail, invoice_no),
 		)
 		self.db.execute(
@@ -109,3 +115,52 @@ class TestStockCostQueries(TestCase):
 		self.add_delivery()
 		self.db.execute("UPDATE `tabStock Ledger Entry` SET is_cancelled = 1")
 		self.assertIsNone(ledger_cost(invoice())[1])
+
+	def order_invoice(self, **kwargs):
+		return invoice(delivery_note=None, dn_detail=None, sales_order="SO-1", so_detail="SOI-1", **kwargs)
+
+	def test_order_created_documents_match_without_direct_invoice_link(self):
+		self.add_invoice(delivery=None, dn_detail=None)
+		self.add_delivery()
+		sources, issue = invoice_sources(self.order_invoice())
+		self.assertIsNone(issue)
+		self.assertEqual(sources[0].delivery_note, "DN-1")
+		self.assertEqual(ledger_cost(sources[0])[1], 200)
+		self.assertIn("Sales Order", sources[0].allocation_basis)
+
+	def test_order_allocation_is_independent_of_which_invoice_is_requested_first(self):
+		self.add_invoice(qty=3, delivery=None, dn_detail=None)
+		self.add_invoice(name="SI-2", detail="SII-2", qty=4, delivery=None, dn_detail=None)
+		self.add_delivery(qty=5)
+		self.add_delivery(name="DN-2", detail="DNI-2", qty=2)
+		second = self.order_invoice(sales_invoice="SI-2", sales_invoice_item="SII-2", stock_qty=4)
+		sources, issue = invoice_sources(second)
+		self.assertIsNone(issue)
+		self.assertEqual([(s.delivery_note, s.stock_qty) for s in sources], [("DN-1", 2), ("DN-2", 2)])
+		first_sources, issue = invoice_sources(self.order_invoice(stock_qty=3))
+		self.assertEqual(sum(ledger_cost(s)[1] for s in first_sources + sources), 700)
+		self.assertEqual(
+			[(s.delivery_note, s.stock_qty) for s in invoice_sources(second)[0]], [("DN-1", 2), ("DN-2", 2)]
+		)
+
+	def test_order_allocation_reserves_explicit_invoices_first(self):
+		self.add_invoice(qty=2, delivery=None, dn_detail=None)
+		self.add_invoice(name="SI-2", detail="SII-2", qty=3)
+		self.add_delivery(qty=5)
+		sources, issue = invoice_sources(self.order_invoice())
+		self.assertIsNone(issue)
+		self.assertEqual(sources[0].stock_qty, 2)
+
+	def test_order_allocation_never_consumes_other_order_row_or_reverse_link(self):
+		self.add_invoice(delivery=None, dn_detail=None)
+		self.add_delivery(si_detail="OTHER-SII", invoice_no="OTHER-SI")
+		self.add_delivery(name="DN-2", detail="DNI-2")
+		self.db.execute("UPDATE `tabDelivery Note Item` SET so_detail='SOI-OTHER' WHERE name='DNI-2'")
+		sources, issue = invoice_sources(self.order_invoice())
+		self.assertEqual(sources, [])
+		self.assertIn("insufficient", issue)
+
+	def test_order_matching_does_not_infer_a_return_for_credit_only_invoice(self):
+		self.add_invoice(qty=-2, delivery=None, dn_detail=None)
+		self.add_delivery(qty=-2)
+		self.assertEqual(invoice_sources(self.order_invoice(stock_qty=-2))[0], [])

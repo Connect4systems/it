@@ -99,7 +99,7 @@ class TestStockCosts(TestCase):
 		self.assertEqual(sources[0].allocation_ratio, 1)
 
 	@patch.object(frappe.db, "sql")
-	def test_sales_order_is_never_used_to_guess_delivery(self, sql):
+	def test_sales_order_header_without_item_reference_does_not_guess_delivery(self, sql):
 		sql.return_value = []
 		sources, issue = stock_costs.invoice_sources(
 			invoice(delivery_note=None, dn_detail=None, sales_order="SO-1")

@@ -6,8 +6,14 @@ Average Cost is the historical reference estimate and does not determine profit.
 
 - Stock-updating invoices use their own stock ledger.
 - Other invoices use explicit invoice/delivery item links, including Delivery
-  Note Item `si_detail` for deliveries made after invoicing. Sales Orders alone
-  never establish a cost link.
+  Note Item `si_detail` for deliveries made after invoicing. When both documents
+  were created independently from a Sales Order, unlinked positive invoice rows
+  are allocated through the same company, item, Sales Order and `so_detail`.
+  Explicit links reserve stock first. Remaining invoice demand and deliveries
+  are matched in posting order across all dates, so filtering the report does
+  not allocate the same stock twice. This is a stated allocation rule rather
+  than a new document link; no documents are edited. Matching only the order
+  header or guessing return movements is not allowed.
 - Partial invoices receive their stock-quantity share of a delivery item's cost.
   Multiple explicitly linked deliveries are allocated separately. Bundle
   components are scaled by the invoiced share of the delivered parent quantity.
