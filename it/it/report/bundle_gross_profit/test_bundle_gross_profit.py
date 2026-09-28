@@ -10,6 +10,26 @@ from it.it.report.bundle_gross_profit import bundle_gross_profit
 
 
 class TestBundleGrossProfit(FrappeTestCase):
+	@patch.object(bundle_gross_profit, "_get_outgoing_stock_ledger_rows")
+	def test_actual_cost_uses_weighted_issued_stock_value(self, get_ledger_rows):
+		get_ledger_rows.return_value = [
+			frappe._dict(actual_qty=-2, stock_value_difference=-200, valuation_rate=150),
+			frappe._dict(actual_qty=-3, stock_value_difference=-360, valuation_rate=150),
+		]
+		self.assertEqual(bundle_gross_profit._get_actual_stock_cost(frappe._dict()), 112)
+
+	@patch.object(bundle_gross_profit, "_get_outgoing_stock_ledger_rows")
+	def test_actual_cost_distinguishes_missing_and_zero_cost(self, get_ledger_rows):
+		for rows, expected in (
+			([], None),
+			([frappe._dict(actual_qty=-1, stock_value_difference=0)], 0),
+			([frappe._dict(actual_qty=-1, stock_value_difference=None)], None),
+			([frappe._dict(actual_qty=0, stock_value_difference=0)], None),
+		):
+			with self.subTest(rows=rows):
+				get_ledger_rows.return_value = rows
+				self.assertEqual(bundle_gross_profit._get_actual_stock_cost(frappe._dict()), expected)
+
 	def test_split_serial_numbers_supports_legacy_formats(self):
 		self.assertEqual(
 			bundle_gross_profit._split_serial_numbers("SER-1\nSER-2, SER-3\r\nSER-4"),

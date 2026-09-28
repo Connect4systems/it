@@ -75,6 +75,7 @@ def get_columns():
 		},
 		{"label": _("Qty"), "fieldname": "qty", "fieldtype": "Float", "width": 90},
 		{"label": _("Average Cost"), "fieldname": "average_cost", "fieldtype": "Currency", "width": 120},
+		{"label": _("Actual Cost"), "fieldname": "actual_cost", "fieldtype": "Currency", "width": 120},
 		{"label": _("Cost Basis"), "fieldname": "cost_basis", "fieldtype": "Data", "width": 240},
 		{"label": _("Cost Amount"), "fieldname": "cost_amount", "fieldtype": "Currency", "width": 130},
 		{"label": _("Sales Amount"), "fieldname": "sales_amount", "fieldtype": "Currency", "width": 130},
@@ -128,6 +129,7 @@ def get_data(filters):
 						"component_item": component.get("item_code"),
 						"qty": qty,
 						"average_cost": avg_cost,
+						"actual_cost": _get_actual_stock_cost(component),
 						"cost_basis": cost_basis,
 						"cost_amount": cost_amount,
 						"sales_amount": 0,
@@ -155,6 +157,7 @@ def get_data(filters):
 				"component_item": None,
 				"qty": flt(item.get("stock_qty") or item.get("qty")),
 				"average_cost": None if is_bundle else average_cost,
+				"actual_cost": None if is_bundle else _get_actual_stock_cost(item),
 				"cost_basis": _("Sum of component costs") if is_bundle else cost_basis,
 				"cost_amount": total_cost,
 				"sales_amount": sales_amount,
@@ -933,6 +936,23 @@ def _get_incoming_ledger_row_rate(row):
 		return amount / qty
 
 	return abs(flt(row.get("valuation_rate")))
+
+
+def _get_actual_stock_cost(row):
+	"""Return the issued stock value per stock unit for the sale's ledger entries."""
+	ledger_rows = _get_outgoing_stock_ledger_rows(row, ("actual_qty", "stock_value_difference"))
+	total_qty = 0
+	total_cost = 0
+	for ledger_row in ledger_rows:
+		qty = abs(flt(ledger_row.get("actual_qty")))
+		if not qty:
+			continue
+		if ledger_row.get("stock_value_difference") is None:
+			return None
+		total_qty += qty
+		total_cost += abs(flt(ledger_row.get("stock_value_difference")))
+
+	return total_cost / total_qty if total_qty else None
 
 
 def _get_fifo_stock_ledger_average(row):
