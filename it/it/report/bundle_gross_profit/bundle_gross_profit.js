@@ -4,6 +4,26 @@
 frappe.query_reports["Bundle Gross Profit"] = {
 	filters: [
 		{
+			fieldname: "reconcile_cogs",
+			label: __("Reconcile COGS"),
+			fieldtype: "Check",
+			default: 0,
+		},
+		{
+			fieldname: "cogs_account",
+			label: __("COGS Account"),
+			fieldtype: "Link",
+			options: "Account",
+			depends_on: "eval:doc.reconcile_cogs",
+			get_query: () => ({
+				filters: {
+					company: frappe.query_report.get_filter_value("company"),
+					is_group: 0,
+					root_type: "Expense",
+				},
+			}),
+		},
+		{
 			fieldname: "company",
 			label: __("Company"),
 			fieldtype: "Link",
