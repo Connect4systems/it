@@ -7,8 +7,6 @@ import frappe
 from frappe import _
 from frappe.utils import flt, get_datetime
 
-from .stock_costs import invoice_sources, ledger_cost, stock_qty
-
 
 def execute(filters=None):
 	filters = frappe._dict(filters or {})
@@ -16,19 +14,10 @@ def execute(filters=None):
 
 	columns = get_columns()
 	data = get_data(filters)
-	if filters.get("reconcile_cogs"):
-		from .cogs_reconciliation import execute_reconciliation
-
-		return execute_reconciliation(filters, data)
 	chart = get_chart(data)
 	report_summary = get_report_summary(data)
-	message = _(
-		"Cost Amount uses actual signed stock values. Average Cost is reference only. "
-		"Rows requiring review have incomplete costs and no profit calculation. "
-		"Use Reconcile COGS to compare voucher totals with the General Ledger."
-	)
-	# Component costs already appear in parents; never generate an additional tree total.
-	return columns, data, message, chart, report_summary, True
+
+	return columns, data, None, chart, report_summary
 
 
 def _validate_filters(filters):
@@ -36,15 +25,6 @@ def _validate_filters(filters):
 		frappe.throw(_("Company is required"))
 	if not filters.get("from_date") or not filters.get("to_date"):
 		frappe.throw(_("From Date and To Date are required"))
-	if get_datetime(filters.from_date) > get_datetime(filters.to_date):
-		frappe.throw(_("From Date must not be after To Date"))
-	if filters.get("reconcile_cogs") and any(
-		filters.get(key)
-		for key in ("customer", "sales_partner", "parent_item", "sales_invoice", "delivery_note")
-	):
-		frappe.throw(
-			_("Clear customer, sales partner, item, invoice and delivery filters to reconcile company COGS")
-		)
 
 
 def get_columns():
@@ -95,9 +75,7 @@ def get_columns():
 		},
 		{"label": _("Qty"), "fieldname": "qty", "fieldtype": "Float", "width": 90},
 		{"label": _("Average Cost"), "fieldname": "average_cost", "fieldtype": "Currency", "width": 120},
-		{"label": _("Actual Cost"), "fieldname": "actual_cost", "fieldtype": "Currency", "width": 120},
 		{"label": _("Cost Basis"), "fieldname": "cost_basis", "fieldtype": "Data", "width": 240},
-		{"label": _("Cost Status"), "fieldname": "cost_status", "fieldtype": "Data", "width": 140},
 		{"label": _("Cost Amount"), "fieldname": "cost_amount", "fieldtype": "Currency", "width": 130},
 		{"label": _("Sales Amount"), "fieldname": "sales_amount", "fieldtype": "Currency", "width": 130},
 		{"label": _("Gross Profit"), "fieldname": "gross_profit", "fieldtype": "Currency", "width": 130},
@@ -112,185 +90,81 @@ def get_columns():
 
 def get_data(filters):
 	rows = []
-	cost_context = {"has_serial_no": {}, "outgoing_cutoffs": {}, "serial_rates": {}, "valuation_rates": {}}
-	for item in _get_sales_invoice_items(filters):
-		non_stock = _is_non_stock_service(item)
-		sources, issue = ([], None) if non_stock else invoice_sources(item)
-		if (
-			filters.get("delivery_note")
-			and item.get("delivery_note") != filters.delivery_note
-			and not any(s.get("delivery_note") == filters.delivery_note for s in sources)
-		):
+	invoice_items = _get_sales_invoice_items(filters)
+	cost_context = {
+		"has_serial_no": {},
+		"outgoing_cutoffs": {},
+		"serial_rates": {},
+		"valuation_rates": {},
+	}
+
+	for item in invoice_items:
+		_resolve_delivery_note_link(item)
+		if _is_zero_value_sales_order_bom_component(item):
 			continue
+
+		components = _get_components_for_invoice_item(item)
 		component_rows = []
-		allocations = []
-		total_cost = 0
-		weighted_average = 0
-		costed_qty = 0
-		is_bundle = False
-		basis = [_("No stock movement; non-stock item")] if non_stock else []
-		for source in sources:
-			components = _get_components_for_invoice_item(source)
-			is_bundle = is_bundle or bool(components)
-			cost_rows = components or [source]
-			for cost_row in cost_rows:
-				cost_row = frappe._dict(cost_row)
-				cost_row.company = item.company
-				cost_row.posting_date = item.posting_date
-				if components:
-					# Invoice packed rows already represent the invoiced quantity.
-					if cost_row.parenttype == "Delivery Note":
-						cost_row.stock_qty = stock_qty(cost_row) * source.allocation_ratio
-				actual, amount, cost_basis = ledger_cost(cost_row)
-				if source.get("allocation_basis"):
-					cost_basis = source.allocation_basis + "; " + cost_basis
-				average = None
-				if amount is not None:
-					average = _get_item_cost(cost_row, abs(stock_qty(cost_row)), cost_context)[0]
-					total_cost += amount
-					voucher_type = "Sales Invoice" if source.get("update_stock") else "Delivery Note"
-					voucher_no = source.sales_invoice if source.get("update_stock") else source.delivery_note
-					allocations.append(
-						{
-							"voucher_type": voucher_type,
-							"voucher_no": voucher_no,
-							"cost": amount,
-							"detail": cost_row.get("parent_detail_docname")
-							or cost_row.get("name")
-							or source.get("dn_detail")
-							or source.sales_invoice_item,
-							"item_code": cost_row.item_code,
-							"qty": stock_qty(cost_row),
-							"component": bool(components),
-						}
-					)
-				else:
-					issue = issue or cost_basis
-				basis.append(cost_basis)
-				if components:
-					component_rows.append(
-						{
-							"indent": 1,
-							"row_label": cost_row.get("item_name") or cost_row.item_code,
-							"sales_invoice": item.sales_invoice,
-							"delivery_note": source.get("delivery_note"),
-							"posting_date": item.posting_date,
-							"customer": item.customer,
-							"sales_partner": item.sales_partner,
-							"parent_item": item.item_code,
-							"component_item": cost_row.item_code,
-							"qty": stock_qty(cost_row),
-							"average_cost": average,
-							"actual_cost": actual,
-							"cost_basis": cost_basis,
-							"cost_amount": amount,
-							"sales_amount": 0,
-							"gross_profit": None,
-							"gross_profit_percent": None,
-							"cost_status": _("Review required") if amount is None else _("Verified"),
-						}
-					)
-				elif amount is not None:
-					weighted_average += flt(average) * abs(stock_qty(source))
-					costed_qty += abs(stock_qty(source))
-		sales_amount = flt(item.base_net_amount)
-		gross_profit = None if issue else sales_amount - total_cost
-		delivery_notes = sorted(
-			{s.delivery_note for s in sources if s.get("delivery_note") and not s.get("update_stock")}
-		)
-		bundle_basis = _("Sum of actual component costs")
-		if any(s.get("allocation_basis") for s in sources):
-			bundle_basis += "; " + _("Sales Order item allocation (posting order)")
+		is_bundle = bool(components)
+
+		if is_bundle:
+			total_cost = 0
+			for component in components:
+				component.setdefault("posting_date", item.posting_date)
+				qty = abs(flt(component.get("stock_qty") or component.get("qty")))
+				avg_cost, cost_amount, cost_basis = _get_component_cost(component, cost_context)
+				total_cost += cost_amount
+
+				component_rows.append(
+					{
+						"indent": 1,
+						"row_label": component.get("item_name") or component.get("item_code"),
+						"sales_invoice": item.sales_invoice,
+						"delivery_note": item.delivery_note,
+						"posting_date": item.posting_date,
+						"customer": item.customer,
+						"sales_partner": item.sales_partner,
+						"parent_item": item.item_code,
+						"component_item": component.get("item_code"),
+						"qty": qty,
+						"average_cost": avg_cost,
+						"cost_basis": cost_basis,
+						"cost_amount": cost_amount,
+						"sales_amount": 0,
+						"gross_profit": None,
+						"gross_profit_percent": None,
+					}
+				)
+		else:
+			average_cost, total_cost, cost_basis = _get_invoice_item_cost(item, cost_context)
+
+		sales_amount = flt(item.base_net_amount or item.net_amount or item.amount)
+		gross_profit = sales_amount - total_cost
+		gross_profit_percent = (gross_profit / sales_amount * 100) if sales_amount else 0
+
 		rows.append(
 			{
 				"indent": 0,
 				"row_label": item.item_name or item.item_code,
 				"sales_invoice": item.sales_invoice,
-				"delivery_note": delivery_notes[0] if len(delivery_notes) == 1 else None,
+				"delivery_note": item.delivery_note,
 				"posting_date": item.posting_date,
 				"customer": item.customer,
 				"sales_partner": item.sales_partner,
 				"parent_item": item.item_code,
 				"component_item": None,
-				"qty": stock_qty(item),
-				"average_cost": weighted_average / costed_qty if costed_qty and not is_bundle else None,
-				"actual_cost": total_cost / stock_qty(item)
-				if stock_qty(item) and not is_bundle and not issue
-				else None,
-				"cost_basis": issue or (bundle_basis if is_bundle else "; ".join(dict.fromkeys(basis))),
-				"cost_amount": total_cost if allocations or not issue else None,
+				"qty": flt(item.get("stock_qty") or item.get("qty")),
+				"average_cost": None if is_bundle else average_cost,
+				"cost_basis": _("Sum of component costs") if is_bundle else cost_basis,
+				"cost_amount": total_cost,
 				"sales_amount": sales_amount,
 				"gross_profit": gross_profit,
-				"gross_profit_percent": (gross_profit / sales_amount * 100 if sales_amount else 0)
-				if gross_profit is not None
-				else None,
-				"cost_status": _("Review required") if issue else _("Verified"),
-				"cost_incomplete": bool(issue),
-				"stock_allocations": allocations,
-				"_bom_component": _is_zero_value_sales_order_bom_component(item),
+				"gross_profit_percent": gross_profit_percent,
 			}
 		)
 		rows.extend(component_rows)
-	return _remove_represented_component_rows(rows)
 
-
-def _is_non_stock_service(item):
-	# Non-stock services have no inventory cost; manual expenses remain in reconciliation.
-	if not item.get("item_code"):
-		return True
-	if frappe.get_cached_value("Item", item.item_code, "is_stock_item"):
-		return False
-	return not (
-		frappe.db.exists("Product Bundle", {"new_item_code": item.item_code})
-		or _get_sales_invoice_components(item.sales_invoice, item.sales_invoice_item, item.item_code)
-		or _get_sales_order_custom_bom_item_codes(item.get("sales_order"), item.item_code)
-	)
-
-
-def _remove_represented_component_rows(rows):
-	"""Hide a zero-sales custom BOM row only when its exact cost is already in a parent."""
-	from collections import defaultdict
-
-	represented = defaultdict(float)
-
-	def key(row, allocation):
-		return (
-			row["sales_invoice"],
-			allocation["voucher_type"],
-			allocation["voucher_no"],
-			allocation["detail"],
-			allocation["item_code"],
-		)
-
-	for row in rows:
-		for allocation in row.get("stock_allocations", []):
-			if allocation.get("component"):
-				represented[key(row, allocation)] += allocation["qty"]
-	result = []
-	for row in rows:
-		is_component = row.pop("_bom_component", False)
-		allocations = row.get("stock_allocations", [])
-		if (
-			is_component
-			and allocations
-			and not row.get("cost_incomplete")
-			and all(abs(represented.get(key(row, a), 0) - a["qty"]) < 0.000001 for a in allocations)
-		):
-			continue
-		if is_component and any(key(row, a) in represented for a in allocations):
-			# Do not count overlapping quantities again when the custom BOM mapping is inconsistent.
-			row.update(
-				cost_amount=None,
-				actual_cost=None,
-				gross_profit=None,
-				gross_profit_percent=None,
-				stock_allocations=[],
-				cost_incomplete=True,
-				cost_status=_("Review required"),
-				cost_basis=_("Custom BOM and component invoice quantities overlap; review allocation"),
-			)
-		result.append(row)
-	return result
+	return rows
 
 
 def _get_sales_invoice_items(filters):
@@ -329,9 +203,6 @@ def _get_sales_invoice_items(filters):
 		f"""
 		SELECT
 			si.name AS sales_invoice,
-			si.company,
-			si.update_stock,
-			si.is_return,
 			si.posting_date,
 			si.customer,
 			si.sales_partner,
@@ -364,7 +235,7 @@ def _get_components_for_invoice_item(item):
 	if not components and item.get("delivery_note") and item.get("sales_order"):
 		components = _get_delivery_note_custom_bom_components(item)
 
-	if not components and not item.get("delivery_note"):
+	if not components:
 		components = _get_sales_invoice_components(
 			item.sales_invoice, item.sales_invoice_item, item.item_code
 		)
@@ -372,24 +243,121 @@ def _get_components_for_invoice_item(item):
 	return components
 
 
+def _resolve_delivery_note_link(item):
+	if item.get("delivery_note"):
+		return
+
+	linked_dn = _find_delivery_note_for_invoice_item(item)
+	if linked_dn:
+		item.delivery_note = linked_dn.get("delivery_note")
+		item.dn_detail = linked_dn.get("dn_detail")
+
+
+def _find_delivery_note_for_invoice_item(item):
+	lookups = []
+
+	if item.get("sales_invoice"):
+		for fieldname in ("against_sales_invoice", "sales_invoice"):
+			if _has_column("Delivery Note Item", fieldname):
+				lookups.append((f"dni.{fieldname} = %(sales_invoice)s", {}))
+
+	if item.get("sales_order"):
+		for fieldname in ("against_sales_order", "sales_order"):
+			if _has_column("Delivery Note Item", fieldname):
+				extra_conditions = {}
+				if item.get("so_detail") and _has_column("Delivery Note Item", "so_detail"):
+					extra_conditions["so_detail"] = item.get("so_detail")
+				lookups.append((f"dni.{fieldname} = %(sales_order)s", extra_conditions))
+
+	for condition, extra_conditions in lookups:
+		conditions = [
+			"dn.docstatus = 1",
+			"dni.item_code = %(item_code)s",
+			condition,
+		]
+		params = {
+			"sales_invoice": item.get("sales_invoice"),
+			"sales_order": item.get("sales_order"),
+			"item_code": item.get("item_code"),
+		}
+
+		if extra_conditions.get("so_detail"):
+			conditions.append("dni.so_detail = %(so_detail)s")
+			params["so_detail"] = extra_conditions["so_detail"]
+
+		row = frappe.db.sql(
+			f"""
+			SELECT dni.parent AS delivery_note, dni.name AS dn_detail
+			FROM `tabDelivery Note Item` dni
+			INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+			WHERE {" AND ".join(conditions)}
+			ORDER BY dn.posting_date DESC, dn.name DESC, dni.idx
+			LIMIT 1
+			""",
+			params,
+			as_dict=True,
+		)
+		if row:
+			return row[0]
+
+	if item.get("sales_order"):
+		for fieldname in ("against_sales_order", "sales_order"):
+			if not _has_column("Delivery Note Item", fieldname):
+				continue
+
+			row = frappe.db.sql(
+				f"""
+				SELECT dni.parent AS delivery_note, dni.name AS dn_detail
+				FROM `tabDelivery Note Item` dni
+				INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+				WHERE dn.docstatus = 1
+					AND dni.{fieldname} = %(sales_order)s
+				ORDER BY dn.posting_date DESC, dn.name DESC, dni.idx
+				LIMIT 1
+				""",
+				{"sales_order": item.get("sales_order")},
+				as_dict=True,
+			)
+			if row:
+				return row[0]
+
+	return None
+
+
 def _get_delivery_note_filter_condition():
-	return """sii.delivery_note = %(delivery_note)s OR EXISTS (
-		SELECT 1 FROM `tabDelivery Note Item` dni_filter
-		INNER JOIN `tabDelivery Note` dn_filter ON dn_filter.name = dni_filter.parent
-		WHERE dn_filter.docstatus = 1 AND dn_filter.company = si.company
-			AND dni_filter.parent = %(delivery_note)s
-			AND dni_filter.item_code = sii.item_code
-			AND (dni_filter.si_detail = sii.name
-				OR (dni_filter.against_sales_invoice = si.name AND IFNULL(dni_filter.si_detail, '') = ''))
-	) OR EXISTS (
-		SELECT 1 FROM `tabDelivery Note Item` order_dni
-		INNER JOIN `tabDelivery Note` order_dn ON order_dn.name = order_dni.parent
-		WHERE order_dn.docstatus = 1 AND order_dn.company = si.company
-			AND order_dni.parent = %(delivery_note)s AND order_dni.item_code = sii.item_code
-			AND order_dni.against_sales_order = sii.sales_order AND order_dni.so_detail = sii.so_detail
-			AND IFNULL(sii.so_detail, '') != '' AND sii.stock_qty > 0
-			AND IFNULL(sii.delivery_note, '') = '' AND IFNULL(sii.dn_detail, '') = ''
-	)"""
+	conditions = ["sii.delivery_note = %(delivery_note)s"]
+
+	for fieldname in ("against_sales_invoice", "sales_invoice"):
+		if _has_column("Delivery Note Item", fieldname):
+			conditions.append(
+				f"""
+				EXISTS (
+					SELECT 1
+					FROM `tabDelivery Note Item` dni_filter
+					WHERE dni_filter.parent = %(delivery_note)s
+						AND dni_filter.{fieldname} = si.name
+						AND dni_filter.item_code = sii.item_code
+				)
+				"""
+			)
+
+	if _has_column("Sales Invoice Item", "sales_order"):
+		for fieldname in ("against_sales_order", "sales_order"):
+			if _has_column("Delivery Note Item", fieldname):
+				conditions.append(
+					f"""
+					EXISTS (
+						SELECT 1
+						FROM `tabDelivery Note Item` dni_filter
+						WHERE dni_filter.parent = %(delivery_note)s
+							AND dni_filter.{fieldname} = sii.sales_order
+							AND IFNULL(sii.sales_order, '') != ''
+							AND dni_filter.item_code = sii.item_code
+					)
+					"""
+				)
+
+	return " OR ".join(conditions)
 
 
 def _get_delivery_note_components(delivery_note, dn_detail, parent_item):
@@ -454,26 +422,11 @@ def _get_delivery_note_custom_bom_components(item):
 		WHERE dn.docstatus = 1
 			AND dni.parent = %(delivery_note)s
 			AND dni.item_code IN %(component_items)s
-			AND EXISTS (
-				SELECT 1 FROM `tabSales Invoice Item` component_sii
-				WHERE component_sii.parent = %(sales_invoice)s
-					AND component_sii.dn_detail = dni.name
-					AND component_sii.item_code = dni.item_code
-					AND component_sii.base_net_amount = 0
-			)
-			AND (SELECT COUNT(DISTINCT bom.custom_parent_product) FROM `tabDelivery BOM` bom
-				WHERE bom.parent = %(sales_order)s AND bom.parenttype = 'Sales Order'
-					AND bom.item = dni.item_code) = 1
-			AND (SELECT COUNT(*) FROM `tabSales Invoice Item` parent_sii
-				WHERE parent_sii.parent = %(sales_invoice)s AND parent_sii.item_code = %(parent_item)s) = 1
 		ORDER BY dni.idx
 		""",
 		{
 			"delivery_note": item.get("delivery_note"),
 			"component_items": tuple(component_items),
-			"sales_invoice": item.get("sales_invoice"),
-			"sales_order": item.get("sales_order"),
-			"parent_item": item.get("item_code"),
 		},
 		as_dict=True,
 	)
@@ -982,23 +935,6 @@ def _get_incoming_ledger_row_rate(row):
 	return abs(flt(row.get("valuation_rate")))
 
 
-def _get_actual_stock_cost(row):
-	"""Return the issued stock value per stock unit for the sale's ledger entries."""
-	ledger_rows = _get_outgoing_stock_ledger_rows(row, ("actual_qty", "stock_value_difference"))
-	total_qty = 0
-	total_cost = 0
-	for ledger_row in ledger_rows:
-		qty = abs(flt(ledger_row.get("actual_qty")))
-		if not qty:
-			continue
-		if ledger_row.get("stock_value_difference") is None:
-			return None
-		total_qty += qty
-		total_cost += abs(flt(ledger_row.get("stock_value_difference")))
-
-	return total_cost / total_qty if total_qty else None
-
-
 def _get_fifo_stock_ledger_average(row):
 	ledger_rows = _get_outgoing_stock_ledger_rows(
 		row,
@@ -1081,9 +1017,10 @@ def _get_outgoing_stock_ledger_rows(row, requested_fields):
 			{**params, "voucher_detail_no": voucher_detail_no},
 			available_fields,
 		)
-		return detail_rows
+		if detail_rows:
+			return detail_rows
 
-	return []
+	return _query_outgoing_stock_ledger_rows(conditions, params, available_fields)
 
 
 def _query_outgoing_stock_ledger_rows(conditions, params, fields):
@@ -1104,7 +1041,7 @@ def _get_outgoing_reference(row):
 		return "Delivery Note", row.get("delivery_note"), row.get("dn_detail")
 
 	if row.get("parenttype") in ("Delivery Note", "Sales Invoice"):
-		return row.get("parenttype"), row.get("parent"), row.get("parent_detail_docname") or row.get("name")
+		return row.get("parenttype"), row.get("parent"), row.get("name")
 
 	if row.get("sales_invoice"):
 		return "Sales Invoice", row.get("sales_invoice"), row.get("sales_invoice_item")
@@ -1139,32 +1076,20 @@ def get_report_summary(data):
 	cost_amount = sum(flt(d.get("cost_amount")) for d in parent_rows)
 	gross_profit = sales_amount - cost_amount
 	gross_profit_percent = (gross_profit / sales_amount * 100) if sales_amount else 0
-	incomplete = sum(bool(d.get("cost_incomplete")) for d in parent_rows)
 
 	return [
 		{"value": sales_amount, "indicator": "Blue", "label": _("Sales Amount"), "datatype": "Currency"},
+		{"value": cost_amount, "indicator": "Orange", "label": _("Bundle Cost"), "datatype": "Currency"},
 		{
-			"value": cost_amount,
-			"indicator": "Orange",
-			"label": _("Known Bundle Cost (incomplete)") if incomplete else _("Bundle Cost"),
+			"value": gross_profit,
+			"indicator": "Green" if gross_profit >= 0 else "Red",
+			"label": _("Gross Profit"),
 			"datatype": "Currency",
 		},
 		{
-			"value": _("Incomplete costs") if incomplete else gross_profit,
-			"indicator": "Orange" if incomplete else ("Green" if gross_profit >= 0 else "Red"),
-			"label": _("Gross Profit"),
-			"datatype": "Data" if incomplete else "Currency",
-		},
-		{
-			"value": _("Incomplete costs") if incomplete else gross_profit_percent,
-			"indicator": "Orange" if incomplete else ("Green" if gross_profit >= 0 else "Red"),
+			"value": gross_profit_percent,
+			"indicator": "Green" if gross_profit >= 0 else "Red",
 			"label": _("Gross Profit %"),
-			"datatype": "Data" if incomplete else "Percent",
-		},
-		{
-			"value": incomplete,
-			"indicator": "Orange" if incomplete else "Green",
-			"label": _("Rows requiring review"),
-			"datatype": "Int",
+			"datatype": "Percent",
 		},
 	]
