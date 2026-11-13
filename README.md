@@ -39,3 +39,28 @@ This app can use GitHub Actions for CI. The following workflows are configured:
 ### License
 
 mit
+
+### Cash Flow Forecast
+
+After updating the app, run `bench --site <site> migrate` and `bench --site <site> clear-cache`.
+Open **Cash Flow Forecast** (`/app/query-report/Cash%20Flow%20Forecast`), select the company
+and date range, then expand Customer Receipts / Refunds or Supplier Payments / Refunds
+to inspect invoice links, posting dates, due dates, and expected amounts.
+
+The report groups current outstanding balances of submitted Sales and Purchase Invoices
+by **invoice Due Date**, including partial payments and signed credit balances.
+It includes invoices posted through today and respects invoice read permissions.
+Company currency amounts use the original invoice exchange rate when the party account
+is in foreign currency; outstanding already in company currency is not converted again.
+Invoices due before From Date have a separate optional column. Missing due dates have a
+separate No Due Date column. These columns contribute to Total, not to a forecast month.
+
+This is a current-balance projection, not a historical snapshot or a bank balance forecast.
+It does not split payment schedule instalments or include orders and other unbilled commitments.
+The standard Cash Flow report continues to show ledger-based financial statements.
+
+Run calculation tests without a Frappe installation:
+
+```bash
+python -m unittest it.it.report.cash_flow_forecast.test_forecast
+```
